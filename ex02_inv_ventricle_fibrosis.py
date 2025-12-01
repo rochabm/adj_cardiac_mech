@@ -300,7 +300,7 @@ opt_sol = minimize(
     # method="CG",
     method="L-BFGS-B",
     # method="SLSQP",
-    tol=1e-3,
+    tol=1e-12,
     callback=callback,
     bounds=cbounds,
     # options={"disp": True},
@@ -338,10 +338,10 @@ Jtotal_form = dolfinx.fem.form(Jfunctional)
 Jtotal_value = dolfinx.fem.assemble_scalar(Jtotal_form)
 
 print(f"alpha (reg.)   : {float(alpha):.8e}")
-print(f"max rel error  : {rel_error_max:.8f}")
-print(f"J data value   : {Jdata_value:.8f}")
-print(f"J smooth value : {Jsmooth_value:.8f}")
-print(f"J total value  : {Jtotal_value:.8f}")
+print(f"max rel error  : {rel_error_max:.8e}")
+print(f"J data value   : {Jdata_value:.8e}")
+print(f"J smooth value : {Jsmooth_value:.8e}")
+print(f"J total value  : {Jtotal_value:.8e}")
 
 np.savetxt('functional_history.txt', vals_func)
 
