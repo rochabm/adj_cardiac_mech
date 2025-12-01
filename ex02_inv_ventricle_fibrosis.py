@@ -94,9 +94,6 @@ n0 = geo.n0
 # xdmf.write_function(n0)
 # xdmf.close()    
 
-
-# TO-DO: arrumar as FIBRAS, pegar da geometria
-
 # initial guess
 def cinit_expr(x):
     # return 4.0 - 3.8 * ((x[0] - 0.7)**2 + (x[1] - 0.5)**2 + (x[2] - 0.5)**2 < 0.3**2)
@@ -185,7 +182,7 @@ Fun = ufl.inner(P, ufl.grad(v)) * dx + Gendo
 # -----------------------------------------------------------------------------
 # functional for optimization 
 # -----------------------------------------------------------------------------
-alpha = dolfinx.fem.Constant(domain, 1.0e-3 ) #+2 )
+alpha = dolfinx.fem.Constant(domain, 1.0e+1 )#-3 ) #+2 )
 
 # Constant function = 1
 one = dolfinx.fem.Constant(domain, dolfinx.default_scalar_type(1.0))
@@ -198,16 +195,17 @@ epsh = ufl.sym(ufl.grad(uh))
 Fd = ufl.variable(I + ufl.grad(ud))
 Fh = ufl.variable(I + ufl.grad(uh))
 
+
 # Jfunctional = (1/2) * ufl.inner(uh - ud, uh - ud) * dx + (alpha/2) * ufl.inner(ufl.grad(CC), ufl.grad(CC)) * dx
-
 # Jfunctional = (1/2) * ufl.inner(epsd-epsh, epsd-epsh) * dx + (alpha/2) * ufl.inner(ufl.grad(CC), ufl.grad(CC)) * dx
-
+# Jfunctional = (1/2) * ufl.inner(epsd-epsh, epsd-epsh) * dx + (alpha/2) * ufl.inner(CC, CC) * dx
 # Jfunctional = (1/2) * ufl.inner(epsd-epsh, epsd-epsh) * dx + (alpha/2) * ufl.inner(CC, CC) * dx
 
-Jfunctional = (1/2) * ufl.inner(Fh-Fd, Fh-Fd) * dx + (alpha/volume_mesh) * ufl.inner(ufl.grad(CC), ufl.grad(CC)) * dx
+Jdata = (1/2) * ufl.inner(Fh-Fd, Fh-Fd) * dx
+Jsmooth = (1.0/volume_mesh) * ufl.inner(ufl.grad(CC), ufl.grad(CC)) * dx
 
+Jfunctional = Jdata + alpha*Jsmooth
 
-# Jfunctional = (1/2) * ufl.inner(epsd-epsh, epsd-epsh) * dx + (alpha/2) * ufl.inner(CC, CC) * dx
 
 # forward problem function
 def solve_nl_prob(uh):
@@ -254,7 +252,10 @@ dLdf = dolfinx.fem.Function(W)
 
 Jh = dolfinx.fem.form(Jfunctional)
 
-Jvalues = []
+vals_func = []
+vals_data = []
+vals_smooth = []
+Jits = [0,]
 
 # function to evaluate functional
 def eval_J(x):
@@ -280,11 +281,12 @@ def eval_gradient(x):
 # callback function
 def callback(intermediate_result):
     # print(intermediate_result)
-
     fval = intermediate_result.fun
+    vals_func.append(fval)
+    Jits[0] = Jits[0] + 1
+    print(f"optimization iteration {Jits[0]}")
     print(f"value of functional J: {fval}\n")
-    Jvalues.append(fval)
-    print(intermediate_result.x)
+    # print(intermediate_result.x)
 
 print("\nbegin optimization\n")
 
@@ -298,7 +300,7 @@ opt_sol = minimize(
     # method="CG",
     method="L-BFGS-B",
     # method="SLSQP",
-    tol=1e-12,
+    tol=1e-3,
     callback=callback,
     bounds=cbounds,
     # options={"disp": True},
@@ -313,6 +315,11 @@ CC.x.array[:] = opt_sol.x
 # evaluate forward problem
 solve_nl_prob(uh)
 
+# -----------------------------------------------------------------------------
+# final computations for output
+# -----------------------------------------------------------------------------
+print("summary of results:\n")
+
 # error
 error = fem.Function(Va)
 error.x.array[:] = np.abs(CC.x.array[:] - cd.x.array[:])
@@ -322,10 +329,21 @@ den = abs(cd.x.array[i_max])
 num = abs_err[i_max]
 rel_error_max = num / den
 
-print(f"alpha    : {float(alpha)}")
-print(f"max error: {rel_error_max:.6f}")
+# compute functional terms separately (data + smooth)
+Jdata_form = dolfinx.fem.form(Jdata)
+Jdata_value = dolfinx.fem.assemble_scalar(Jdata_form)
+Jsmooth_form = dolfinx.fem.form(Jsmooth)
+Jsmooth_value = dolfinx.fem.assemble_scalar(Jsmooth_form)
+Jtotal_form = dolfinx.fem.form(Jfunctional)
+Jtotal_value = dolfinx.fem.assemble_scalar(Jtotal_form)
 
-np.savetxt('functional_history.txt', Jvalues)
+print(f"alpha (reg.)   : {float(alpha):.8e}")
+print(f"max rel error  : {rel_error_max:.8f}")
+print(f"J data value   : {Jdata_value:.8f}")
+print(f"J smooth value : {Jsmooth_value:.8f}")
+print(f"J total value  : {Jtotal_value:.8f}")
+
+np.savetxt('functional_history.txt', vals_func)
 
 # Exportar archivos XDMF (igual que tu segundo script)
 with XDMFFile(MPI.COMM_WORLD, "out_cc_estimated.xdmf", "w") as xdmf:
@@ -352,4 +370,4 @@ with XDMFFile(MPI.COMM_WORLD, "out_cc_error.xdmf", "w") as xdmf:
     xdmf.write_mesh(domain)
     xdmf.write_function(error)
 
-print("end optimization")
+print("\nend optimization")

@@ -87,30 +87,30 @@ def prob_ventricle_passive_filling(geo):
     # CC distribution -  Compute AHA regions
     # -------------------------------------------------------
 
-    foc = focal(r_long_endo=geo.info['r_long_endo'], 
-                r_short_endo=geo.info['r_short_endo'])
-    mu_base = geo.info['mu_base_endo']
-    mu_base = abs(mu_base) 
-    dmu = (np.pi - mu_base) / 4.0
+    # foc = focal(r_long_endo=geo.info['r_long_endo'], 
+    #             r_short_endo=geo.info['r_short_endo'])
+    # mu_base = geo.info['mu_base_endo']
+    # mu_base = abs(mu_base) 
+    # dmu = (np.pi - mu_base) / 4.0
 
-    V0 = fem.functionspace(domain, ("DG", 0)) 
-    cval = fem.Function(V0)
-    values = cval.x.array
+    # V0 = fem.functionspace(domain, ("DG", 0)) 
+    # cval = fem.Function(V0)
+    # values = cval.x.array
 
-    segments = get_aha_segments(domain, foc, mu_base, dmu)
-    for i in range(len(segments)):
-        if segments[i] == 12:
-            values[i] = 4.0
-        else:
-            values[i] = 2.0
+    # segments = get_aha_segments(domain, foc, mu_base, dmu)
+    # for i in range(len(segments)):
+    #     if segments[i] == 12:
+    #         values[i] = 4.0
+    #     else:
+    #         values[i] = 2.0
 
-    cval.x.array[:] = values
-    cval.x.scatter_forward()
+    # cval.x.array[:] = values
+    # cval.x.scatter_forward()
 
-    Va = fem.functionspace(domain, ("Lagrange", 1))
-    CC = fem.Function(Va)
+    # Va = fem.functionspace(domain, ("Lagrange", 1))
+    # CC = fem.Function(Va)
     
-    CC.interpolate(cval)
+    # CC.interpolate(cval)
 
     # -------------------------------------------------------
     # CC distribution - Smooth gaussian
@@ -173,9 +173,9 @@ def prob_ventricle_passive_filling(geo):
     # def c_expr(x):
     #     return 1.1 - 0.0*x[1] 
 
-    # Va = fem.functionspace(domain, ("Lagrange", 1)) 
-    # CC = fem.Function(Va)
-    # CC.interpolate(c_expr)
+    Va = fem.functionspace(domain, ("Lagrange", 1)) 
+    CC = fem.Function(Va)
+    CC.interpolate(c_expr)
 
     # -------------------------------------------------------
 
