@@ -125,8 +125,13 @@ Va = fem.functionspace(domain, ("Lagrange", 1))
 CC = fem.Function(Va)
 CC.interpolate(cinit_expr)
 
+np.random.seed(42)
+
 # random field in [2,3]
-CC.x.array[:] = 2.0 + 0.1*np.random.rand(len(CC.x.array))
+# CC.x.array[:] = 2.0 + 0.1*np.random.rand(len(CC.x.array))
+# CC.x.scatter_forward()
+
+CC.x.array[:] = 2.0 + 1.0*np.random.rand(len(CC.x.array))
 CC.x.scatter_forward()
 
 # Exportar archivos XDMF (igual que tu segundo script)
@@ -182,7 +187,7 @@ Fun = ufl.inner(P, ufl.grad(v)) * dx + Gendo
 # -----------------------------------------------------------------------------
 # functional for optimization 
 # -----------------------------------------------------------------------------
-alpha = dolfinx.fem.Constant(domain, 1.0e+1 )#-3 ) #+2 )
+alpha = dolfinx.fem.Constant(domain, 0.0 )# 1e-2-3 ) #+2 )
 
 # Constant function = 1
 one = dolfinx.fem.Constant(domain, dolfinx.default_scalar_type(1.0))
@@ -300,10 +305,14 @@ opt_sol = minimize(
     # method="CG",
     method="L-BFGS-B",
     # method="SLSQP",
-    tol=1e-12,
+    # tol=1e-12,
     callback=callback,
     bounds=cbounds,
-    # options={"disp": True},
+    options={
+        "gtol": 1e-6,
+        "maxiter": 1000,
+        "disp": True
+        },
 )
 
 print("optimization results:")
@@ -323,11 +332,14 @@ print("summary of results:\n")
 # error
 error = fem.Function(Va)
 error.x.array[:] = np.abs(CC.x.array[:] - cd.x.array[:])
+
 abs_err = np.abs(error.x.array)
 i_max = np.argmax(abs_err)
 den = abs(cd.x.array[i_max])
 num = abs_err[i_max]
+
 rel_error_max = num / den
+error.x.array[:] /= den
 
 # compute functional terms separately (data + smooth)
 Jdata_form = dolfinx.fem.form(Jdata)

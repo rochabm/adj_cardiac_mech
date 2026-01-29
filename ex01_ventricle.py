@@ -87,95 +87,94 @@ def prob_ventricle_passive_filling(geo):
     # CC distribution -  Compute AHA regions
     # -------------------------------------------------------
 
-    # foc = focal(r_long_endo=geo.info['r_long_endo'], 
-    #             r_short_endo=geo.info['r_short_endo'])
-    # mu_base = geo.info['mu_base_endo']
-    # mu_base = abs(mu_base) 
-    # dmu = (np.pi - mu_base) / 4.0
+    foc = focal(r_long_endo=geo.info['r_long_endo'], 
+                r_short_endo=geo.info['r_short_endo'])
+    mu_base = geo.info['mu_base_endo']
+    mu_base = abs(mu_base) 
+    dmu = (np.pi - mu_base) / 4.0
 
-    # V0 = fem.functionspace(domain, ("DG", 0)) 
-    # cval = fem.Function(V0)
-    # values = cval.x.array
+    V0 = fem.functionspace(domain, ("DG", 0)) 
+    cval = fem.Function(V0)
+    values = cval.x.array
 
-    # segments = get_aha_segments(domain, foc, mu_base, dmu)
-    # for i in range(len(segments)):
-    #     if segments[i] == 12:
-    #         values[i] = 4.0
-    #     else:
-    #         values[i] = 2.0
+    segments = get_aha_segments(domain, foc, mu_base, dmu)
+    for i in range(len(segments)):
+        if segments[i] == 12:
+            values[i] = 4.0
+        else:
+            values[i] = 2.0
 
-    # cval.x.array[:] = values
-    # cval.x.scatter_forward()
+    cval.x.array[:] = values
+    cval.x.scatter_forward()
 
-    # Va = fem.functionspace(domain, ("Lagrange", 1))
-    # CC = fem.Function(Va)
-    
-    # CC.interpolate(cval)
+    Va = fem.functionspace(domain, ("Lagrange", 1))
+    CC = fem.Function(Va)
+    CC.interpolate(cval)
 
     # -------------------------------------------------------
     # CC distribution - Smooth gaussian
     # -------------------------------------------------------
 
-    def c_expr(x):
-        # x has shape (3, N)
-        xc,yc,zc = -5, -2, -9
-        sigma=8.0
-        dx = x[0] - xc
-        dy = x[1] - yc
-        dz = x[2] - zc
-        r2 = dx*dx + dy*dy + dz*dz
-        r = np.sqrt(dx*dx + dy*dy + dz*dz)
-        c_center = 8.0
-        c_far = 2.0
-        return c_far + (c_center - c_far) * np.exp(-r2 / sigma**2)
-        # return c_far + (c_center - c_far) * np.exp(-r / sigma)
+    # def c_expr(x):
+    #     # x has shape (3, N)
+    #     xc,yc,zc = -5, -2, -9
+    #     sigma=8.0
+    #     dx = x[0] - xc
+    #     dy = x[1] - yc
+    #     dz = x[2] - zc
+    #     r2 = dx*dx + dy*dy + dz*dz
+    #     r = np.sqrt(dx*dx + dy*dy + dz*dz)
+    #     c_center = 8.0
+    #     c_far = 2.0
+    #     return c_far + (c_center - c_far) * np.exp(-r2 / sigma**2)
+    #     # return c_far + (c_center - c_far) * np.exp(-r / sigma)
 
-    def c_expr(x):
-        xc, yc, zc = -5, -2, -9
-        dx = x[0] - xc
-        dy = x[1] - yc
-        dz = x[2] - zc
-        r = np.sqrt(dx*dx + dy*dy + dz*dz)
+    # def c_expr(x):
+    #     xc, yc, zc = -5, -2, -9
+    #     dx = x[0] - xc
+    #     dy = x[1] - yc
+    #     dz = x[2] - zc
+    #     r = np.sqrt(dx*dx + dy*dy + dz*dz)
 
-        c_center = 3.0
-        c_far = 2.0
+    #     c_center = 3.0
+    #     c_far = 2.0
 
-        r0 = 5.0   # plateau radius
-        r1 = 10.0 #15.0  # transition outer radius
+    #     r0 = 5.0   # plateau radius
+    #     r1 = 10.0 #15.0  # transition outer radius
 
-        # smoothstep
-        def smoothstep(t):
-            return 3*t*t - 2*t*t*t
+    #     # smoothstep
+    #     def smoothstep(t):
+    #         return 3*t*t - 2*t*t*t
 
-        if isinstance(r, np.ndarray):
-            C = np.zeros_like(r)
+    #     if isinstance(r, np.ndarray):
+    #         C = np.zeros_like(r)
 
-            inside = r <= r0
-            outside = r >= r1
-            middle = (~inside) & (~outside)
+    #         inside = r <= r0
+    #         outside = r >= r1
+    #         middle = (~inside) & (~outside)
 
-            C[inside] = c_center
-            C[outside] = c_far
+    #         C[inside] = c_center
+    #         C[outside] = c_far
 
-            t = (r1 - r[middle]) / (r1 - r0)
-            C[middle] = c_far + (c_center - c_far) * smoothstep(t)
-            return C
-        else:
-            if r <= r0:
-                return c_center
-            elif r >= r1:
-                return c_far
-            else:
-                t = (r1 - r) / (r1 - r0)
-                return c_far + (c_center - c_far) * smoothstep(t)
+    #         t = (r1 - r[middle]) / (r1 - r0)
+    #         C[middle] = c_far + (c_center - c_far) * smoothstep(t)
+    #         return C
+    #     else:
+    #         if r <= r0:
+    #             return c_center
+    #         elif r >= r1:
+    #             return c_far
+    #         else:
+    #             t = (r1 - r) / (r1 - r0)
+    #             return c_far + (c_center - c_far) * smoothstep(t)
             
     # initial guess
     # def c_expr(x):
     #     return 1.1 - 0.0*x[1] 
 
-    Va = fem.functionspace(domain, ("Lagrange", 1)) 
-    CC = fem.Function(Va)
-    CC.interpolate(c_expr)
+    # Va = fem.functionspace(domain, ("Lagrange", 1)) 
+    # CC = fem.Function(Va)
+    # CC.interpolate(c_expr)
 
     # -------------------------------------------------------
 
