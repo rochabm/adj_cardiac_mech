@@ -131,7 +131,8 @@ def add_sensor_overlay(pl, grid, indicator_key="measurement_indicator",
 
 
 def scalar_plot(pl, grid, field, cmap="viridis", clim=None, title="",
-                show_sensors=True, sensor_grid=None, opacity=1.0):
+                show_sensors=True, sensor_grid=None, opacity=1.0,
+                show_scalar_bar=True):
     """Add a scalar field to a plotter subplot with opacity so sensors are visible."""
     if field in grid.point_data:
         d = grid.point_data[field]
@@ -146,10 +147,17 @@ def scalar_plot(pl, grid, field, cmap="viridis", clim=None, title="",
 
     if clim is None:
         clim = (float(np.nanmin(d)), float(np.nanmax(d)))
+
+    # show_scalar_bar=False suppresses the auto colorbar from add_mesh
     pl.add_mesh(grid, scalars=field, cmap=cmap,
-                clim=clim, show_edges=False, opacity=opacity)
-    pl.add_scalar_bar(title, n_labels=5, fmt="%.2e",
-                      label_font_size=10, title_font_size=11)
+                clim=clim, show_edges=False, opacity=opacity,
+                show_scalar_bar=False)
+
+    # add one clean colorbar explicitly when requested
+    if show_scalar_bar:
+        pl.add_scalar_bar(title, n_labels=4, fmt="%.2e",
+                          label_font_size=9, title_font_size=10)
+
     if show_sensors and sensor_grid is not None:
         add_sensor_overlay(pl, sensor_grid)
     pl.add_title(title, font_size=10)
@@ -234,8 +242,8 @@ else:
             continue
         pl = pv.Plotter(window_size=(900, 700))
         pl.add_mesh(grid_main, scalars=field, cmap=cmap,
-                    show_edges=False, opacity=1.0)
-        pl.add_scalar_bar(field, n_labels=5, fmt="%.2e")
+                    show_edges=False, opacity=1.0, show_scalar_bar=False)
+        pl.add_scalar_bar(field, n_labels=4, fmt="%.2e")
         add_sensor_overlay(pl, grid_main)
         pl.add_title(title, font_size=11)
         pl.show()   # blocks until window is closed
@@ -293,8 +301,9 @@ else:
         pl = pv.Plotter(window_size=(900, 700))
         kw = {"clim": clim} if clim else {}
         pl.add_mesh(grid_main, scalars=field, cmap=cmap,
-                    show_edges=False, opacity=1.0, **kw)
-        pl.add_scalar_bar(field, n_labels=5, fmt="%.2e")
+                    show_edges=False, opacity=1.0,
+                    show_scalar_bar=False, **kw)
+        pl.add_scalar_bar(field, n_labels=4, fmt="%.2e")
         add_sensor_overlay(pl, grid_main)
         pl.add_title(f"{title}  (close to continue)", font_size=11)
         pl.show()
@@ -323,7 +332,7 @@ if grid_eig is not None:
                        if k.startswith("eigenvector_")])[:6]
 ncols = len(eig_keys)
 if ncols > 0:
-    pl6 = pv.Plotter(shape=(1, ncols), off_screen=OFF,
+    pl6 = pv.Plotter(shape=(1, ncols), off_screen=True,  # always off-screen for multi-panel
                       window_size=(300*ncols, 500))
     for i, key in enumerate(eig_keys):
         pl6.subplot(0, i)
@@ -335,8 +344,7 @@ if ncols > 0:
                     show_sensors=False)
     pl6.link_views()
     pl6.screenshot(str(OUT / "fig6_pyvista_eigenvectors.png"))
-    if not OFF:
-        pl6.show()
+    pl6.close()
     print("  Saved: fig6_pyvista_eigenvectors.png")
 else:
     print("  Skipped fig6 (out_uq_eigenvectors.h5 not found)")
@@ -355,7 +363,7 @@ if len(samp_keys) > 0:
     all_vals = np.concatenate([grid_samp.point_data[k] for k in samp_keys])
     s_clim   = (float(all_vals.min()), float(all_vals.max()))
 
-    pl7 = pv.Plotter(shape=(1, len(samp_keys)), off_screen=OFF,
+    pl7 = pv.Plotter(shape=(1, len(samp_keys)), off_screen=True,  # always off-screen for multi-panel
                       window_size=(300*len(samp_keys), 500))
     for i, key in enumerate(samp_keys):
         pl7.subplot(0, i)
@@ -364,8 +372,6 @@ if len(samp_keys) > 0:
                     show_sensors=False)
     pl7.link_views()
     pl7.screenshot(str(OUT / "fig7_pyvista_samples.png"))
-    if not OFF:
-        pl7.show()
     print("  Saved: fig7_pyvista_samples.png")
 else:
     print("  Skipped fig7 (out_uq_samples.h5 not found)")
