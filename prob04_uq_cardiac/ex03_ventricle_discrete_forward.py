@@ -126,7 +126,8 @@ def prob_ventricle_passive_filling(geo, ndofs_data=32, case_type="fibrosis"):
             dz = x[2] - zc
             r = np.sqrt(dx*dx + dy*dy + dz*dz)
 
-            c_center = 4.0
+            # c_center = 4.0
+            c_center = 8.0
             c_far = 2.0
 
             r0 = 5.0

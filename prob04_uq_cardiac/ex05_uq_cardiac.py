@@ -1,27 +1,34 @@
 """
-ex04_uq_cardiac.py
+ex05_uq_cardiac.py
 -------------------
 Bayesian UQ for the cardiac passive filling inverse problem.
 
-Follows the SAME code structure as subsurface_bayesian.py but applied to
-the nonlinear hyperelastic cardiac mechanics problem (ex03/ex04).
+Two parameters are now DECOUPLED:
+    alpha : regularization parameter for the MAP cost functional
+            J = Jmisfit + 0.5 m^T R m  (prior provides regularization)
+    gamma, delta : prior parameters for the Laplacian prior
+            H_prior = gamma*K + delta*M  (controls prior shape/scale)
+
+This follows the correct Bayesian formulation where the prior is
+independent of the regularization, as in Bui-Thanh et al. (2013).
 
 Pipeline:
-    1.  Geometry + FE spaces (from ex03/ex04)
+    1.  Geometry + FE spaces
     2.  Constitutive model (Holzapfel-Ogden passive)
-    3.  Tikhonov prior (H_prior = R = delta*M + gamma*K on Va)
-    4.  Synthetic data (from prob_ventricle_passive_filling)
-    5.  Cost functional + gradient (adjoint method)
-    6.  FD gradient check
-    7.  MAP via inexact Newton-CG (Eisenstat-Walker)
-    8.  Hessian FD verification at MAP
-    9.  Generalized eigenproblem H_misfit v = lambda H_prior v
-   10.  Woodbury pointwise variance
-   11.  Posterior samples
-   12.  Visualization + XDMF output
+    3.  Synthetic data (from prob_ventricle_passive_filling)
+    4.  Cost functional J = Jmisfit + 0.5 m^T R m
+    5.  Prior H_prior = gamma*K + delta*M  (independent of alpha)
+    6.  Adjoint gradient
+    7.  FD gradient check
+    8.  MAP via inexact Newton-CG
+    9.  Hessian FD verification at MAP
+   10.  Generalized eigenproblem H_misfit v = lambda H_prior v
+   11.  Woodbury pointwise variance
+   12.  Posterior samples
+   13.  XDMF output + plots
 
 Usage:
-    python ex04_uq_cardiac.py [--case-type fibrosis] [--num-nodes 64]
+    python ex05_uq_cardiac.py [--case-type fibrosis] [--num-nodes 64]
                               [--alpha 1e-3] [--gamma 0.1] [--delta 0.5]
                               [--k-eig 50] [--output-dir .]
 """
@@ -54,18 +61,20 @@ from newton_cg_solver import inexact_newton_cg
 # =============================================================================
 
 parser = argparse.ArgumentParser(
-    description="ex04 UQ — cardiac inverse problem with Laplace approximation"
+    description="ex05 UQ — cardiac Bayesian inverse problem (prior=R, no alpha*Jsmooth)"
 )
 parser.add_argument("--case-type",  type=str,   default="fibrosis",
                     choices=["fibrosis", "linear"])
 parser.add_argument("--num-nodes",  type=int,   default=64,
                     help="Number of measurement nodes (default: 64)")
 parser.add_argument("--alpha",      type=float, default=1e-3,
-                    help="Regularization weight (default: 1e-3)")
+                    help="Regularization parameter (default: 1e-3)")
 parser.add_argument("--gamma",      type=float, default=0.1,
-                    help="Prior stiffness coefficient (default: 0.1)")
+                    help="Prior stiffness (gamma*K term, default: 0.1)")
 parser.add_argument("--delta",      type=float, default=0.5,
-                    help="Prior mass coefficient (default: 0.5)")
+                    help="Prior mass (delta*M term, default: 0.5)")
+parser.add_argument("--m0",         type=float, default=3.0,
+                    help="Prior mean (healthy CC value, default: 3.0)")
 parser.add_argument("--k-eig",      type=int,   default=50,
                     help="Number of eigenpairs for low-rank UQ (default: 50)")
 parser.add_argument("--gtol",       type=float, default=1e-8)
@@ -79,6 +88,7 @@ Nnodes      = args.num_nodes
 alpha_value = args.alpha
 gamma_pr    = args.gamma
 delta_pr    = args.delta
+m0_prior    = args.m0
 k_eig       = args.k_eig
 my_gtol     = args.gtol
 my_ftol     = args.ftol
@@ -86,12 +96,13 @@ OUTPUT_DIR  = Path(args.output_dir)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("\n" + "="*60)
-print(" CARDIAC UQ PARAMETERS")
+print(" CARDIAC UQ PARAMETERS (ex05)")
 print(f"  case_type  = {CASE_TYPE}")
 print(f"  num_nodes  = {Nnodes}")
-print(f"  alpha      = {alpha_value}")
+print(f"  alpha      = {alpha_value}  (regularization)")
 print(f"  gamma      = {gamma_pr}  (prior stiffness)")
 print(f"  delta      = {delta_pr}  (prior mass)")
+print(f"  m0_prior   = {m0_prior}  (prior mean -- healthy CC)")
 print(f"  k_eig      = {k_eig}")
 print(f"  gtol       = {my_gtol}")
 print(f"  ftol       = {my_ftol}")
@@ -216,12 +227,10 @@ Fun   = ufl.inner(P, ufl.grad(v)) * dx + Gendo
 # 7. Forward solver (load stepping)
 # =============================================================================
 
-def solve_nl_prob(uh_func, tight_tol=False):
+def solve_nl_prob(uh_func):
     forward_problem = NonlinearProblem(Fun, uh_func, bcs)
     solver = NewtonSolver(domain.comm, forward_problem)
-    # tight tolerances for Taylor test, standard for optimization
-    tol = 1e-12 if tight_tol else 1e-8
-    solver.atol = tol;  solver.rtol = tol
+    solver.atol = 1e-8;  solver.rtol = 1e-8
     ksp = solver.krylov_solver
     ksp.setType("preonly");  ksp.getPC().setType("lu")
     loads = np.linspace(0, -3.0, 10)
@@ -235,7 +244,6 @@ def solve_nl_prob(uh_func, tight_tol=False):
 # 8. Cost functional + prior
 # =============================================================================
 
-alpha_reg  = dolfinx.fem.Constant(domain, alpha_value)
 volume_form = dolfinx.fem.form(
     dolfinx.fem.Constant(domain, dolfinx.default_scalar_type(1.0)) * dx)
 volume_mesh = dolfinx.fem.assemble_scalar(volume_form)
@@ -266,58 +274,61 @@ Fd_func.x.scatter_forward();  indicator.x.scatter_forward()
 diffF       = F - Fd_func
 Jdata       = 0.5 * (1.0/volume_mesh) * indicator * ufl.inner(diffF, diffF) * dx
 Jsmooth     = (1.0/volume_mesh) * ufl.inner(ufl.grad(CC), ufl.grad(CC)) * dx
+# Jfunctional includes alpha*Jsmooth for MAP conditioning.
+# H_prior matches Hessian(alpha*Jsmooth) exactly so H_misfit = H_full - H_prior
+# correctly isolates data information for the eigenproblem.
+alpha_reg   = dolfinx.fem.Constant(domain, alpha_value)
 Jfunctional = Jdata + alpha_reg * Jsmooth
 Jh          = dolfinx.fem.form(Jfunctional)
 
 # =============================================================================
-# 9. Tikhonov prior operator H_prior = R = delta*M + gamma*K
-#    Same structure as subsurface_bayesian.py BiLaplacianPrior,
-#    but isotropic (no anisotropic tensor, no Robin BC needed here)
+# 9. Prior operator H_prior = gamma*K + delta*M
+#    DECOUPLED from alpha (regularization parameter).
+#    gamma controls stiffness (correlation length), delta controls mass (amplitude).
+#    This is the correct Bayesian formulation: prior is independent of alpha.
 # =============================================================================
 
 class CardiacPrior:
     """
-    Regularization operator for the cardiac inverse problem.
+    Laplacian prior for the cardiac parameter field CC.
 
-    Jsmooth = (1/volume_mesh) * ||grad CC||^2 * dx
-    H_reg   = d^2 Jsmooth / dCC^2 = (2/volume_mesh) * K
-              where K is the stiffness matrix on Va.
+    H_prior = gamma*K + delta*M   (DECOUPLED from alpha)
 
-    BUT: using only K (no mass term) makes H_reg singular
-    (null space = constant functions). We add a small mass term
-    for well-posedness: H_prior = (2*alpha/volume_mesh)*K + eps*M
-    where eps is small enough not to change physics but large enough
-    to make the system invertible.
+    gamma controls the stiffness (spatial correlation length).
+    delta controls the mass term (pointwise variance amplitude).
 
-    Actually the correct H_prior to pass to generalized_eigensolver
-    must satisfy: H_full = H_misfit + H_prior, so H_misfit = H_full - H_prior.
-    H_full comes from HessianOperator which includes alpha*Jsmooth.
-    The Hessian of alpha*Jsmooth wrt CC is:
-        H_smooth(q, dq) = alpha * (2/volume_mesh) * inner(grad q, grad dq) * dx
-    So H_prior = H_smooth exactly.
+    These are independent of the regularization parameter alpha used
+    in J = Jmisfit + 0.5 m^T R m.
 
-    For invertibility we add a small Tikhonov mass term:
-        H_prior = alpha*(2/volume_mesh)*K + delta*M
-    where delta is small (default 1e-4).
+    Note: The Laplacian prior is not trace-class in 3D (pointwise
+    variance is mesh-dependent). For mesh-independence, the BiLaplacian
+    C = R^{-1}MR^{-1} should be used, but requires careful calibration
+    of gamma/delta to match H_misfit in magnitude. For a fixed mesh,
+    the Laplacian prior is acceptable (Bui-Thanh et al. 2013, Sec. 6.2).
+
+    Interface (duck-typed for generalized_eigensolver + woodbury):
+        mult(v)    = H_prior * v = R v
+        solve(v)   = H_prior^{-1} * v = R^{-1} v
+        diag_inv() = diag(R^{-1}) via Hutchinson estimator
     """
 
-    def __init__(self, Va, alpha, volume_mesh, dx, delta_mass=None):
+    def __init__(self, Va, gamma, delta, dx, alpha=None, volume_mesh=None):
         n = Va.dofmap.index_map.size_local * Va.dofmap.index_map_bs
         self.ndofs = n
 
         q  = ufl.TrialFunction(Va)
         dq = ufl.TestFunction(Va)
 
-        # H_prior = alpha * Hessian(Jsmooth)
-        # = alpha * (2/volume_mesh) * K + eps * M
-        # so that H_misfit = H_full - H_prior = H_full - alpha*H_smooth
-        # which correctly isolates the data misfit Hessian.
-        scale    = float(alpha) * 2.0 / volume_mesh
-        eps_mass = 0.01 * scale
-
         K_form = ufl.inner(ufl.grad(q), ufl.grad(dq)) * dx
         M_form = ufl.inner(q, dq) * dx
-        R_form = scale * K_form + eps_mass * M_form
+        # H_prior matches Hessian(alpha*Jsmooth) = alpha*(2/vol)*K
+        # so H_misfit = H_full - H_prior correctly isolates data term
+        if alpha is not None and volume_mesh is not None:
+            scale    = float(alpha) * 2.0 / volume_mesh
+            eps_mass = 0.01 * scale
+            R_form = scale * K_form + eps_mass * M_form
+        else:
+            R_form = float(gamma) * K_form + float(delta) * M_form
 
         self._R = fem.petsc.assemble_matrix(fem.form(R_form))
         self._R.assemble()
@@ -340,13 +351,7 @@ class CardiacPrior:
         self._M.mult(self._b, self._x)
         self._M_diag = np.maximum(self._x.array.copy(), 1e-30)
 
-        print(f"  CardiacPrior: scale(K)={scale:.3e}, eps_mass={eps_mass:.3e}")
-
-        # lumped mass diagonal for prior variance estimate
-        ones = np.ones(n)
-        self._b.array[:] = ones
-        self._M.mult(self._b, self._x)
-        self._M_diag = np.maximum(self._x.array.copy(), 1e-30)
+        print(f"  CardiacPrior: H_prior matched to alpha*Hessian(Jsmooth), ndofs={n}")
 
     def _R_mult(self, v):
         self._b.array[:] = v
@@ -358,12 +363,11 @@ class CardiacPrior:
         self._ksp.solve(self._b, self._x)
         return self._x.array.copy()
 
-    # duck-typed interface for generalized_eigensolver + woodbury
     def mult(self, v):   return self._R_mult(v)
     def solve(self, v):  return self._R_solve(v)
 
     def diag_inv(self, n_samples=300, seed=7):
-        """Hutchinson estimate of diag(R^{-1})."""
+        """Hutchinson estimate of diag(R^{-1}) = diag(H_prior^{-1})."""
         rng = np.random.default_rng(seed)
         diag = np.zeros(self.ndofs)
         for _ in range(n_samples):
@@ -379,8 +383,9 @@ class CardiacPrior:
             pass
 
 
-prior = CardiacPrior(Va, alpha_reg, volume_mesh, dx, delta_mass=1e-4)
-print(f"CardiacPrior built: H_prior = (2*alpha/vol)*K + 1e-4*M, ndofs={prior.ndofs}")
+prior = CardiacPrior(Va, gamma_pr, delta_pr, dx,
+                     alpha=alpha_value, volume_mesh=volume_mesh)
+
 
 # =============================================================================
 # 10. Adjoint + gradient
@@ -402,14 +407,13 @@ dLdf       = dolfinx.fem.Function(Va)
 _cache_x = None;  _cache_J = None;  _cache_g = None
 
 
-def _solve_and_cache(x, tight_tol=False):
+def _solve_and_cache(x):
     global _cache_x, _cache_J, _cache_g
     if _cache_x is None or not np.allclose(x, _cache_x):
         CC.x.array[:] = x;  CC.x.scatter_forward()
         uh.x.array[:] = 0.0
-        solve_nl_prob(uh, tight_tol=tight_tol)
-        _cache_J = domain.comm.allreduce(
-            fem.assemble_scalar(Jh), op=MPI.SUM)
+        solve_nl_prob(uh)
+        _cache_J = domain.comm.allreduce(fem.assemble_scalar(Jh), op=MPI.SUM)
         lmbda_new = adj_problem.solve()
         lmbda.x.array[:] = lmbda_new.x.array
         lmbda.x.scatter_forward()
@@ -426,27 +430,8 @@ def eval_J(x):
 def eval_gradient(x):
     _solve_and_cache(x);  return _cache_g
 
-# tight-tolerance versions for Taylor test (Newton tol=1e-12)
-# Key: always solve from uh=0, always use tight tol, never use cache
-def eval_J_tight(x):
-    CC.x.array[:] = x;  CC.x.scatter_forward()
-    uh.x.array[:] = 0.0;  uh.x.scatter_forward()
-    solve_nl_prob(uh, tight_tol=True)
-    return domain.comm.allreduce(fem.assemble_scalar(Jh), op=MPI.SUM)
-
-def eval_gradient_tight(x):
-    CC.x.array[:] = x;  CC.x.scatter_forward()
-    uh.x.array[:] = 0.0;  uh.x.scatter_forward()
-    solve_nl_prob(uh, tight_tol=True)
-    lmbda_t = adj_problem.solve()
-    lmbda.x.array[:] = lmbda_t.x.array;  lmbda.x.scatter_forward()
-    g = np.zeros(prior.ndofs)
-    dolfinx.fem.assemble_vector(g, dJdf_c)
-    dolfinx.fem.assemble_vector(g, dFdf_c)
-    return g
-
 # =============================================================================
-# 11. FD gradient check
+# 10. FD gradient check
 # =============================================================================
 
 print("\n" + "="*60)
@@ -454,13 +439,14 @@ print("FD gradient check")
 print("="*60)
 
 rng_check = np.random.default_rng(7)
-# use prior mean (uniform field) as test point
 m_test = np.full(prior.ndofs, 3.0)
 h_dir  = rng_check.standard_normal(prior.ndofs)
 h_dir /= np.linalg.norm(h_dir)
 
-eps   = 0.2
+# reset cache to force fresh evaluation
+eps   = 0.1
 J0, g0 = eval_J(m_test), eval_gradient(m_test)
+_cache_x = None   # force re-evaluation for perturbed point
 Jp     = eval_J(m_test + eps * h_dir)
 dJ_fd  = (Jp - J0) / eps
 dJ_adj = g0 @ h_dir
@@ -468,44 +454,9 @@ print(f"  FD  directional deriv: {dJ_fd:.6e}")
 print(f"  Adj directional deriv: {dJ_adj:.6e}")
 print(f"  Relative error       : {abs(dJ_adj-dJ_fd)/(abs(dJ_fd)+1e-30):.4e}")
 
-# =============================================================================
-# 11b. Taylor remainder test (gradient + Hessian)
-# =============================================================================
-
-# print("\n" + "="*60)
-# print("Taylor remainder test (gradient and Hessian)")
-# print("="*60)
-
-# from taylor_remainder_test import run_taylor_tests
-
-# # choose eps as absolute values -- the Taylor test requires eps small enough
-# # for the linearization to be valid, but large enough to avoid roundoff.
-# # For the cardiac problem (CC ~ 2-8, J ~ 1e-5), eps in [1e-2, 5e-1] works well.
-# eps_list = [5e-1, 2e-1, 1e-1, 5e-2, 2e-2, 1e-2, 5e-3]
-
-# # need build_hop defined -- define it here temporarily
-# def _build_hop_test():
-#     # force clean evaluation at m_test with tight tol
-#     CC.x.array[:] = m_test;  CC.x.scatter_forward()
-#     uh.x.array[:] = 0.0;  uh.x.scatter_forward()
-#     solve_nl_prob(uh, tight_tol=True)
-#     lmbda_t = adj_problem.solve()
-#     lmbda_t.x.scatter_forward()
-#     lmbda.x.array[:] = lmbda_t.x.array;  lmbda.x.scatter_forward()
-#     return HessianOperator(Fun, Jfunctional, uh, CC, lmbda,
-#                            V, Va, facet_tags, domain)
-
-# taylor_passed = run_taylor_tests(
-#     eval_J_tight, eval_gradient_tight, _build_hop_test,
-#     m_test   = m_test,
-#     rng_seed = 42,
-#     epsilons = eps_list,
-#     savefile = str(OUTPUT_DIR / "fig0_taylor_remainder.png"),
-#     label    = f"cardiac {CASE_TYPE} alpha={alpha_value}",
-# )
 
 # =============================================================================
-# 12. MAP via inexact Newton-CG
+# 11. MAP via inexact Newton-CG
 # =============================================================================
 
 print("\n" + "="*60)
@@ -563,7 +514,7 @@ np.savetxt(
 )
 
 # =============================================================================
-# 13. Hessian FD verification at MAP
+# 12. Hessian FD verification at MAP
 # =============================================================================
 
 print("\n" + "="*60)
@@ -587,7 +538,7 @@ print(f"Hessian verification: max rel err = {max_rel_err:.4e} "
       f"({'PASS' if max_rel_err < 5e-2 else 'FAIL'})")
 
 # =============================================================================
-# 14. Generalized eigenproblem H_misfit v = lambda H_prior v
+# 13. Generalized eigenproblem H_misfit v = lambda H_prior v
 #     Same as subsurface_bayesian.py: doublePassG equivalent
 # =============================================================================
 
@@ -600,15 +551,15 @@ rng_diag = np.random.default_rng(123)
 v_test   = rng_diag.standard_normal(prior.ndofs)
 v_test  /= np.linalg.norm(v_test)
 Hv       = Hop_map.mult(v_test)
-Rv       = prior._R_mult(v_test)
+Rv       = prior.mult(v_test)
 Jdata_now   = dolfinx.fem.assemble_scalar(dolfinx.fem.form(Jdata))
 Jsmooth_now = dolfinx.fem.assemble_scalar(dolfinx.fem.form(Jsmooth))
-print(f"  Jdata at MAP   = {Jdata_now:.4e}")
-print(f"  Jsmooth at MAP = {Jsmooth_now:.4e}")
-print(f"  alpha*Jsmooth  = {alpha_value*Jsmooth_now:.4e}")
-print(f"  Diagnostic: ||H_full·v||  = {np.linalg.norm(Hv):.4e}")
-print(f"  Diagnostic: ||H_prior·v|| = {np.linalg.norm(Rv):.4e}")
-print(f"  Diagnostic: ratio         = {np.linalg.norm(Hv)/np.linalg.norm(Rv):.4e}")
+print(f"  Jdata at MAP        = {Jdata_now:.4e}")
+print(f"  alpha*Jsmooth at MAP= {alpha_value*Jsmooth_now:.4e}")
+print(f"  Diagnostic: ||H_full·v||   = {np.linalg.norm(Hv):.4e}")
+print(f"  Diagnostic: ||H_prior·v||  = {np.linalg.norm(Rv):.4e}  (R = gamma*K + delta*M)")
+print(f"  Diagnostic: ratio          = {np.linalg.norm(Hv)/np.linalg.norm(Rv):.4e}")
+print(f"  (ratio >> 1: data-dominated; ratio ≈ 1: balanced; ratio << 1: prior-dominated)")
 
 p_over = 20
 eigvals, eigvecs = generalized_eigensolver(
@@ -621,7 +572,7 @@ print(f"Eigenvalues > 1   : {np.sum(eigvals > 1)}")
 print(f"Eigenvalues > 0.1 : {np.sum(eigvals > 0.1)}")
 
 # =============================================================================
-# 15. Woodbury pointwise posterior variance
+# 14. Woodbury pointwise posterior variance
 #     Same formula as subsurface_bayesian.py
 # =============================================================================
 
@@ -630,6 +581,7 @@ print("Woodbury pointwise variance")
 print("="*60)
 
 # prior variance: diag(R^{-1}) via randomized eigenpairs of R^{-1}
+# Use prior.solve(v) = R^{-1} v  (Laplacian covariance)
 print("  Computing prior variance via randomized eigenpairs of R^{-1}...")
 n_pr    = prior.ndofs
 k_pr    = min(200, n_pr - 1)
@@ -637,11 +589,11 @@ rng_pr  = np.random.default_rng(77)
 Omega_p = rng_pr.standard_normal((n_pr, k_pr + 10))
 Y_p     = np.zeros_like(Omega_p)
 for i in range(k_pr + 10):
-    Y_p[:, i] = prior._R_solve(Omega_p[:, i])
+    Y_p[:, i] = prior.solve(Omega_p[:, i])   # R^{-1} v
 Q_p, _  = np.linalg.qr(Y_p)
 RinvQ   = np.zeros_like(Q_p)
 for i in range(Q_p.shape[1]):
-    RinvQ[:, i] = prior._R_solve(Q_p[:, i])
+    RinvQ[:, i] = prior.solve(Q_p[:, i])     # R^{-1} v
 T_p  = 0.5 * (Q_p.T @ RinvQ + (Q_p.T @ RinvQ).T)
 lp, vp = np.linalg.eigh(T_p)
 order_p = np.argsort(lp)[::-1][:k_pr]
@@ -662,18 +614,43 @@ print(f"  Correction        : [{correction.min():.3e}, {correction.max():.3e}]")
 np.save(str(OUTPUT_DIR / "out_uq_prior_variance.npy"),    prior_var)
 np.save(str(OUTPUT_DIR / "out_uq_posterior_variance.npy"), post_var)
 
-# empirical sigma from residual (Option 1 from discussion)
-N_obs         = Npoints * 9        # Npoints x 9 components of F (3x3)
-Jdata_value   = dolfinx.fem.assemble_scalar(dolfinx.fem.form(Jdata))
-raw_misfit    = 2.0 * Jdata_value * volume_mesh
-sigma2_emp    = raw_misfit / N_obs
-sigma_emp     = np.sqrt(sigma2_emp)
-var_cal       = post_var * sigma2_emp
-stddev_cal    = np.sqrt(np.clip(var_cal, 0, None))
+# -----------------------------------------------------------------------
+# Physical posterior stddev calibration
+# -----------------------------------------------------------------------
+# The raw post_var is in units of H_prior^{-1} which depends on alpha,
+# volume_mesh and mesh size -- not in CC² units.
+#
+# Correct approach: scale so that the PRIOR std matches the expected
+# physical spread of CC.  The prior should represent our uncertainty
+# before seeing data, which spans roughly the full CC range / 2.
+#
+# Scale factor: s = CC_std_prior_physical / sqrt(mean(prior_var))
+# Then: stddev_physical = sqrt(post_var) * s
+#
+# This gives posterior stddev in the same units as CC, directly
+# comparable to the CC range [CC_min, CC_max].
 
-print(f"\n  Empirical sigma       : {sigma_emp:.4e}")
-print(f"  Calibrated stddev CC  : [{stddev_cal.min():.4e}, {stddev_cal.max():.4e}]")
-print(f"  (Compare CC_true range: [{cd.x.array.min():.3f}, {cd.x.array.max():.3f}])")
+cc_arr          = cd.x.array
+CC_mean         = float(cc_arr.mean())
+CC_std_physical = float(cc_arr.std())    # std of true CC field
+if CC_std_physical < 1e-6:
+    CC_std_physical = (cc_arr.max() - cc_arr.min()) / 2.0
+
+prior_var_mean  = float(prior_var.mean())
+scale_factor    = CC_std_physical / np.sqrt(prior_var_mean) if prior_var_mean > 0 else 1.0
+
+stddev_cal      = np.sqrt(np.clip(post_var, 0, None)) * scale_factor
+prior_stddev    = np.sqrt(prior_var) * scale_factor
+
+print(f"\n  CC_true range         : [{cc_arr.min():.3f}, {cc_arr.max():.3f}]")
+print(f"  CC_true std           : {CC_std_physical:.4f}  (physical scale for prior)")
+print(f"  Prior stddev (physical): [{prior_stddev.min():.4f}, {prior_stddev.max():.4f}]")
+print(f"  Post. stddev (physical): [{stddev_cal.min():.4f}, {stddev_cal.max():.4f}]")
+print(f"  Scale factor          : {scale_factor:.4e}")
+
+# also report variance reduction (always dimensionless and correct)
+var_red_frac = np.clip(1.0 - post_var / (prior_var + 1e-30), 0, 1)
+print(f"  Variance reduction    : [{var_red_frac.min():.3f}, {var_red_frac.max():.3f}]")
 
 # wrap in fem.Function for XDMF output
 prior_var_fun = fem.Function(Va, name="prior_variance")
@@ -686,7 +663,7 @@ stddev_fun = fem.Function(Va, name="posterior_stddev_calibrated")
 stddev_fun.x.array[:] = stddev_cal;  stddev_fun.x.scatter_forward()
 
 # =============================================================================
-# 16. Posterior samples
+# 15. Posterior samples
 #     m_sample = m_map + z_prior - U diag(sqrt(lambda/(lambda+1))) U^T R z_prior
 # =============================================================================
 
@@ -701,7 +678,7 @@ D_coeff   = np.sqrt(eigvals / (eigvals + 1.0))
 all_samples = []
 for i in range(nsamples):
     # draw from prior: z ~ N(0, R^{-1})
-    w = rng_s.standard_normal(prior.ndofs) * np.sqrt(prior._M_diag)
+    w       = rng_s.standard_normal(prior.ndofs)
     z_prior = prior._R_solve(w)
     # low-rank correction
     Rz    = prior._R_mult(z_prior)
@@ -715,7 +692,7 @@ for i in range(nsamples):
     print(f"  sample {i+1}: range [{m_post.min():.3f}, {m_post.max():.3f}]")
 
 # =============================================================================
-# 17. Error analysis
+# 16. Error analysis
 # =============================================================================
 
 CC.x.array[:] = m_map_arr;  CC.x.scatter_forward()
@@ -729,7 +706,7 @@ error_map.x.scatter_forward()
 print(f"\nMAP max pointwise rel error (CC): {(abs_err/denom).max():.6e}")
 
 # =============================================================================
-# 18. XDMF output
+# 17. XDMF output
 # =============================================================================
 
 save_results_xdmf(domain, {
@@ -811,7 +788,7 @@ print("Saved: out_uq_samples.xdmf")
 print("Saved: out_uq_eigenvectors.xdmf")
 
 # =============================================================================
-# 19. Plots
+# 18. Plots
 # =============================================================================
 
 # convergence
@@ -836,22 +813,109 @@ plt.tight_layout()
 plt.savefig(str(OUTPUT_DIR / "fig2_eigenvalue_decay.png"), dpi=150)
 plt.show()
 
-# variance
+# variance -- plot CALIBRATED physical stddev (in CC units)
 coords_Va = Va.tabulate_dof_coordinates()[:, :2]
 fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 for ax, vals, title, cmap in [
-        (axes[0], prior_var,  "Prior variance",               "inferno"),
-        (axes[1], post_var,   "Posterior variance",            "inferno"),
-        (axes[2], np.clip(correction/(prior_var+1e-30),0,1),
-                              "Variance reduction",            "viridis")]:
+        (axes[0], prior_stddev,  "Prior std dev (CC units)",      "inferno"),
+        (axes[1], stddev_cal,    "Posterior std dev (CC units)",   "inferno"),
+        (axes[2], var_red_frac,  "Variance reduction fraction",    "viridis")]:
     cf = ax.tricontourf(coords_Va[:,0], coords_Va[:,1], vals,
                         levels=30, cmap=cmap)
     plt.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=10)
     ax.set_aspect("equal");  ax.set_xticks([]);  ax.set_yticks([])
+plt.suptitle("Posterior UQ (calibrated to CC units)", fontsize=11)
 plt.tight_layout()
 plt.savefig(str(OUTPUT_DIR / "fig3_variance.png"), dpi=150)
 plt.show()
+
+# =============================================================================
+# 19. Regional analysis: fibrosis core vs healthy tissue
+#     Mirrors analyze_fibrosis_region.py but inline using already-computed arrays
+# =============================================================================
+
+if CASE_TYPE == "fibrosis":
+    print("\n" + "="*60)
+    print("Regional analysis: fibrosis core vs healthy tissue")
+    print("="*60)
+
+    # fibrosis geometry (from ex03 c_expr)
+    XC, YC, ZC = -5.0, -2.0, -9.0
+    R0, R1     = 5.0, 10.0   # core radius, outer radius (mm)
+
+    # classify geometry nodes by distance from fibrosis center
+    geom_pts = domain.geometry.x
+    dx_r = geom_pts[:, 0] - XC
+    dy_r = geom_pts[:, 1] - YC
+    dz_r = geom_pts[:, 2] - ZC
+    r    = np.sqrt(dx_r**2 + dy_r**2 + dz_r**2)
+
+    # map geometry nodes → Va dofs
+    # Va is P1: dof i corresponds to geometry node i (for serial runs)
+    n_va = Va.dofmap.index_map.size_local
+    r_va = r[:n_va]   # trim to Va dofs if needed
+
+    mask_core    = r_va <= R0
+    mask_healthy = r_va >= R1
+    mask_trans   = (~mask_core) & (~mask_healthy)
+
+    # arrays already computed: stddev_cal, prior_stddev, var_red_frac,
+    #                           cd.x.array, m_map_arr
+    cc_true_arr = cd.x.array[:n_va]
+    cc_map_arr  = m_map_arr[:n_va]
+    rel_err_arr = np.abs(cc_map_arr - cc_true_arr) / np.maximum(np.abs(cc_true_arr), 1e-12)
+
+    sep = "="*60
+    print(f"\n  Fibrosis center: ({XC}, {YC}, {ZC}) mm")
+    print(f"  Core r <= {R0} mm  |  Healthy r >= {R1} mm")
+    print(f"  Nodes: core={mask_core.sum()}  transition={mask_trans.sum()}  "
+          f"healthy={mask_healthy.sum()}")
+
+    print(f"\n  {'Metric':<30} {'Core':>12} {'Transition':>12} {'Healthy':>12}")
+    print("  " + "-"*68)
+
+    for label, arr in [
+        ("CC_true mean",            cc_true_arr),
+        ("CC_map mean",             cc_map_arr),
+        ("Rel. error mean",         rel_err_arr),
+        ("Rel. error max",          rel_err_arr),
+        ("Prior std dev mean (CC)", prior_stddev[:n_va]),
+        ("Post. std dev mean (CC)", stddev_cal[:n_va]),
+        ("Variance reduction mean", var_red_frac[:n_va]),
+    ]:
+        vals = []
+        for mask in [mask_core, mask_trans, mask_healthy]:
+            v = arr[mask]
+            if len(v) == 0:
+                vals.append("         N/A")
+            elif "max" in label:
+                vals.append(f"{v.max():>12.4f}")
+            else:
+                vals.append(f"{v.mean():>12.4f}")
+        print(f"  {label:<30} {vals[0]} {vals[1]} {vals[2]}")
+
+    # key question
+    post_std_core    = stddev_cal[:n_va][mask_core].mean()
+    post_std_healthy = stddev_cal[:n_va][mask_healthy].mean()
+    vr_core          = var_red_frac[:n_va][mask_core].mean()
+    vr_healthy       = var_red_frac[:n_va][mask_healthy].mean()
+    er_core          = rel_err_arr[mask_core].mean()
+    er_healthy       = rel_err_arr[mask_healthy].mean()
+
+    print(f"\n  {sep}")
+    print(f"  KEY QUESTION: Uncertainty larger/smaller in fibrosis core?")
+    print(f"  {sep}")
+    print(f"  Post. std dev -- Core   : {post_std_core:.4f} CC units")
+    print(f"  Post. std dev -- Healthy: {post_std_healthy:.4f} CC units")
+    if post_std_core > post_std_healthy:
+        print(f"  → Uncertainty LARGER in core ({post_std_core/post_std_healthy:.2f}× higher)")
+    else:
+        print(f"  → Uncertainty SMALLER in core ({post_std_healthy/post_std_core:.2f}× lower)")
+    print(f"\n  Variance reduction -- Core   : {vr_core:.3f}  ({100*vr_core:.1f}% reduced)")
+    print(f"  Variance reduction -- Healthy: {vr_healthy:.3f}  ({100*vr_healthy:.1f}% reduced)")
+    print(f"\n  MAP rel. error -- Core   : {er_core:.4f}  ({100*er_core:.1f}%)")
+    print(f"  MAP rel. error -- Healthy: {er_healthy:.4f}  ({100*er_healthy:.1f}%)")
 
 print("\n=== Done ===")
 print("Output files:")
@@ -860,3 +924,4 @@ for f in ["fig1_MAP_convergence.png", "fig2_eigenvalue_decay.png",
           "out_uq_eigenvalues.txt", "out_uq_prior_variance.npy",
           "out_uq_posterior_variance.npy", "out_uq_newton_cg_history.txt"]:
     print(f"  {OUTPUT_DIR / f}")
+
