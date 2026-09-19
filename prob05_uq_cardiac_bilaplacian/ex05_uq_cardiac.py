@@ -106,6 +106,11 @@ parser.add_argument("--kappa",      type=float, default=1e2,
                          "lower it to expose CC (default: 1e2).")
 parser.add_argument("--k-eig",      type=int,   default=50,
                     help="Number of eigenpairs for low-rank UQ (default: 50)")
+parser.add_argument("--n-hutch",    type=int,   default=1500,
+                    help="Hutchinson samples for diag(C) prior-variance "
+                         "estimate. Higher = smoother variance fields and "
+                         "fewer clipped-negative posterior variances "
+                         "(error ~ 1/sqrt(n); default: 1500).")
 parser.add_argument("--gtol",       type=float, default=1e-8)
 parser.add_argument("--ftol",       type=float, default=1e-20)
 parser.add_argument("--output-dir", type=str,   default=".")
@@ -117,6 +122,7 @@ Nnodes      = args.num_nodes
 alpha_value = args.alpha
 m0_prior    = args.m0
 noise_std   = args.noise_std
+n_hutch     = args.n_hutch
 target_load = args.load
 kappa_bulk  = args.kappa
 k_eig       = args.k_eig
@@ -529,6 +535,50 @@ class BiLaplacianPrior:
             diag += z * self.solve(z)
         return diag / n_samples
 
+    def diag_cov_exact(self):
+        """
+        EXACT diagonal of the prior covariance  C = R^{-1} M R^{-1}.
+
+        For a modest mesh this is far better than Hutchinson: it has ZERO
+        stochastic speckle. We form R^{-1} column by column (the LU factor
+        of R is reused, so each column is one cheap back-substitution),
+        then diag(C)_i = sum_k Y_ki M_kl Y_li with Y = R^{-1}.
+
+        Concretely, with Y = R^{-1} (Y is symmetric since R is SPD):
+            C = Y M Y  ->  diag(C)_i = (Y (M (Y e_i)))_i
+        We assemble Y once (n back-solves) and evaluate diag(Y M Y) with
+        two dense matmuls. Memory is n^2 doubles; fine for n up to a few
+        thousand. Falls back to Hutchinson (diag_inv) for very large n.
+        """
+        n = self.ndofs
+        # Y = R^{-1} : solve R Y = I, one column at a time (LU already built)
+        Y = np.empty((n, n))
+        e = np.zeros(n)
+        for j in range(n):
+            e[j] = 1.0
+            Y[:, j] = self._R_solve(e)
+            e[j] = 0.0
+        # M as dense (small mesh) via its action on the identity
+        Mdense = np.empty((n, n))
+        for j in range(n):
+            e[j] = 1.0
+            Mdense[:, j] = self._M_mult(e)
+            e[j] = 0.0
+        # C = Y M Y ; we only need its diagonal
+        MY = Mdense @ Y          # (n,n)
+        # diag(Y @ MY)_i = sum_k Y_ik (MY)_ki
+        diagC = np.einsum("ik,ki->i", Y, MY)
+        return np.abs(diagC)
+
+    def diag_cov(self, n_samples=1500, seed=7, exact_max_dofs=4000):
+        """
+        Prior pointwise variance diag(C). Uses the EXACT column method when
+        the mesh is small enough (no speckle), otherwise Hutchinson.
+        """
+        if self.ndofs <= exact_max_dofs:
+            return self.diag_cov_exact()
+        return self.diag_inv(n_samples=n_samples, seed=seed)
+
     def __del__(self):
         try:
             self._R.destroy(); self._M.destroy()
@@ -771,18 +821,20 @@ print("Woodbury pointwise variance")
 print("="*60)
 
 # prior variance = diag(C),  C = R^{-1} M R^{-1}  (BiLaplacian covariance).
-# Hutchinson estimate (same estimator woodbury uses), which targets the
-# DIAGONAL directly and is more reliable here than a truncated low-rank
-# reconstruction of a slowly-decaying prior spectrum.
-print("  Computing prior variance diag(C) via Hutchinson...")
-prior_var = np.abs(prior.diag_inv(n_samples=300, seed=77))
+# Uses the EXACT column-wise diagonal for this mesh (no Hutchinson speckle);
+# falls back to Hutchinson only for very large meshes. This removes the
+# blotchy, cell-by-cell texture in the variance plots and the spurious
+# negative posterior variances that came from a noisy prior baseline.
+print(f"  Computing prior variance diag(C) "
+      f"({'exact' if prior.ndofs <= 4000 else f'{n_hutch}-sample Hutchinson'})...")
+prior_var = prior.diag_cov(n_samples=n_hutch, seed=77)
 print(f"  Prior variance: [{prior_var.min():.3e}, {prior_var.max():.3e}]")
 
 # Woodbury posterior variance. woodbury returns its own Hutchinson
 # prior_var estimate first; we discard it and reuse the prior_var above so
 # prior and posterior share one consistent diagonal estimate.
 _, _, correction = woodbury_pointwise_variance(
-    prior, eigvals, eigvecs, n_prior_samples=300, seed=9
+    prior, eigvals, eigvecs, n_prior_samples=n_hutch, seed=9
 )
 post_var = np.maximum(prior_var - correction, 0.0)
 
