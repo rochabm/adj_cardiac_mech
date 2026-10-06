@@ -1,0 +1,556 @@
+\documentclass[11pt]{article}
+
+% ---------------------------------------------------------------------------
+% Packages
+% ---------------------------------------------------------------------------
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!55!black,
+            citecolor=blue!55!black,urlcolor=blue!55!black]{hyperref}
+\usepackage{listings}
+
+% ---------------------------------------------------------------------------
+% Listings style for the algorithm/code boxes
+% ---------------------------------------------------------------------------
+\definecolor{codebg}{gray}{0.96}
+\definecolor{codekw}{rgb}{0.10,0.20,0.60}
+\definecolor{codecm}{rgb}{0.30,0.50,0.30}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape,
+  frame=single, rulecolor=\color{gray!40},
+  breaklines=true, showstringspaces=false,
+  columns=fullflexible, xleftmargin=1em, framexleftmargin=1em,
+  language=Python,
+}
+
+% ---------------------------------------------------------------------------
+% Theorem-like environments
+% ---------------------------------------------------------------------------
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{example}{Example}[section]
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}[section]
+\newtheorem{property}{Property}[section]
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}[section]
+
+% ---------------------------------------------------------------------------
+% Macros
+% ---------------------------------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\divg}{\operatorname{div}}
+\newcommand{\grad}{\nabla}
+\newcommand{\Nc}{\mathcal{N}}
+\newcommand{\Cc}{\mathcal{C}}
+\newcommand{\Ac}{\mathcal{A}}
+\newcommand{\Rc}{\mathcal{R}}
+\newcommand{\Hc}{\mathcal{H}}
+\newcommand{\Wc}{\mathcal{W}}
+\newcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\dd}{\,\mathrm{d}}
+\newcommand{\inner}[2]{\langle #1, #2 \rangle}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\Mmat}{\mathsf{M}}
+\newcommand{\Amat}{\mathsf{A}}
+\newcommand{\Kmat}{\mathsf{K}}
+\newcommand{\Rmat}{\mathsf{R}}
+\newcommand{\Lmat}{\mathsf{L}}
+\newcommand{\bx}{\bm{x}}
+\newcommand{\by}{\bm{y}}
+\newcommand{\bb}{\bm{b}}
+\newcommand{\bw}{\bm{w}}
+\newcommand{\bu}{\bm{u}}
+
+\title{\bf PDE-based Gaussian Priors:\\
+       Theory, Properties, and Sampling}
+\author{Companion notes to \texttt{gaussian\_priors\_fenicsx.py}
+        and \texttt{lv\_priors.py}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+These notes explain, from first principles, the Gaussian random-field priors
+used in infinite-dimensional Bayesian inverse problems and implemented in the
+companion FEniCSx code. We start from the definition of a Gaussian measure on a
+function space, introduce the Whittle--Mat\'ern stochastic PDE (SPDE) that
+generates such fields, and derive the covariance operator as a negative
+fractional power of an elliptic operator. We then explain, step by step, how
+samples are drawn in the discretized (finite-element) setting, why the
+$\alpha=1$ (``Laplacian'') prior is \emph{not} well defined in two and three
+dimensions while $\alpha=2$ (``BiLaplacian'') is, how boundary conditions
+introduce artifacts and how a Robin condition mitigates them, and how an
+anisotropic diffusion tensor controls directional correlation. Each theoretical
+point is tied to the exact line of code that realizes it.
+\end{abstract}
+
+\tableofcontents
+
+% ===========================================================================
+\section{Why priors on functions?}
+% ===========================================================================
+
+In a Bayesian inverse problem we seek an unknown \emph{field}---a spatially
+varying parameter $m(\bx)$ such as tissue stiffness in a ventricle, a
+diffusion coefficient, or an initial condition. The parameter is a function,
+so the prior must be a probability measure on an infinite-dimensional function
+space. The natural choice is a \emph{Gaussian measure}, the function-space
+generalization of the multivariate normal distribution.
+
+A Gaussian measure $\Nc(\bar m, \Cc)$ on a Hilbert space $\Hc$ (for us,
+$\Hc = L^2(\Omega)$ on a domain $\Omega \subset \R^d$) is characterized by
+\begin{itemize}[nosep]
+  \item a \emph{mean} $\bar m \in \Hc$, and
+  \item a \emph{covariance operator} $\Cc : \Hc \to \Hc$, which is
+        self-adjoint, positive, and \emph{trace-class}
+        (i.e.\ $\Tr(\Cc) < \infty$).
+\end{itemize}
+The trace-class requirement is the infinite-dimensional analogue of a
+covariance matrix having finite total variance; it is exactly the condition
+that guarantees samples live in $\Hc$ with probability one. Much of what
+follows is about ensuring this condition holds.
+
+\begin{remark}
+Specifying $\Cc$ directly as an integral operator with a chosen kernel
+(e.g.\ a squared-exponential covariance) yields dense covariance matrices
+after discretization and scales poorly. The \emph{SPDE approach} instead
+specifies $\Cc^{-1}$ (the \emph{precision}) as a differential operator, which
+discretizes to a \emph{sparse} matrix. This is the central computational idea.
+\end{remark}
+
+% ===========================================================================
+\section{The Whittle--Mat\'ern SPDE}
+% ===========================================================================
+
+\subsection{The generating equation}
+
+Whittle observed that a Gaussian random field with a \emph{Mat\'ern} covariance
+is the stationary solution of a linear SPDE driven by spatial white noise
+$\Wc$:
+\begin{equation}
+  \bigl(\delta \,\mathrm{Id} - \gamma\,\Delta\bigr)^{\alpha/2}\, m
+     \;=\; \Wc,
+  \label{eq:spde}
+\end{equation}
+where $\Delta = \divg\grad$ is the Laplacian, $\gamma>0$ controls diffusion,
+$\delta>0$ controls reaction, and $\alpha$ sets the smoothness. White noise
+$\Wc$ has ``covariance'' the identity: $\E[\Wc(\bx)\Wc(\by)] = \delta(\bx-\by)$.
+
+Define the elliptic operator
+\begin{equation}
+  \Ac \;\coloneqq\; -\gamma\,\divg\!\bigl(\Theta\,\grad\,\cdot\bigr)
+                    + \delta\,\mathrm{Id},
+  \label{eq:Aoperator}
+\end{equation}
+where we have generalized $-\gamma\Delta$ to an \emph{anisotropic} diffusion
+$-\gamma\divg(\Theta\grad)$ with a symmetric positive-definite tensor
+$\Theta(\bx)$ (Section~\ref{sec:aniso}); the isotropic case is $\Theta = \mathrm{Id}$.
+Then \eqref{eq:spde} reads $\Ac^{\alpha/2} m = \Wc$, and solving formally,
+\begin{equation}
+  m \;=\; \Ac^{-\alpha/2}\,\Wc.
+  \label{eq:msolve}
+\end{equation}
+
+\subsection{The covariance operator}
+
+Because $\Wc$ has identity covariance and $\Ac$ is self-adjoint, the covariance
+of $m$ is
+\begin{equation}
+  \Cc \;=\; \Ac^{-\alpha/2}\,\bigl(\Ac^{-\alpha/2}\bigr)^{*}
+       \;=\; \Ac^{-\alpha}.
+  \label{eq:covariance}
+\end{equation}
+This is the key identity: \textbf{the prior covariance is a negative power of
+an elliptic differential operator}, and the \emph{precision} operator is the
+positive power
+\begin{equation}
+  \Rc \;\coloneqq\; \Cc^{-1} \;=\; \Ac^{\alpha}.
+\end{equation}
+
+The names used throughout the code follow $\alpha$:
+\begin{center}
+\begin{tabular}{clll}
+\toprule
+$\alpha$ & Name & Covariance & Precision \\
+\midrule
+$1$ & Laplacian   & $\Cc = \Ac^{-1}$  & $\Rc = \Ac$ \\
+$2$ & BiLaplacian & $\Cc = \Ac^{-2}$  & $\Rc = \Ac^2 = \Ac\,\Ac$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The label ``BiLaplacian'' reflects that applying the second-order operator
+$\Ac$ twice yields a \emph{fourth-order} (biharmonic-type) precision operator.
+
+\subsection{Mat\'ern parameters: smoothness, correlation length, variance}
+
+Away from boundaries the solution of \eqref{eq:spde} has the stationary
+Mat\'ern covariance with smoothness $\nu$, correlation length $\rho$, and
+marginal variance $\sigma^2$ given (in $d$ dimensions) by
+\begin{equation}
+  \nu = \alpha - \tfrac{d}{2}, \qquad
+  \rho = \sqrt{\frac{8\nu\,\gamma}{\delta}}, \qquad
+  \sigma^2 = \frac{\Gamma(\nu)}{\Gamma(\nu+\tfrac{d}{2})\,
+             (4\pi)^{d/2}\,\delta^{\nu}\,\gamma^{d/2}}.
+  \label{eq:matern}
+\end{equation}
+Three consequences drive all the experiments:
+\begin{property}[Correlation length]\label{prop:rho}
+$\rho \propto \sqrt{\gamma/\delta}$. To make the field \emph{smoother}
+(longer-range correlation) increase $\gamma$ or decrease $\delta$; to make it
+rougher, do the opposite.
+\end{property}
+\begin{property}[Smoothness / trace-class]\label{prop:nu}
+$m$ has (just under) $\nu = \alpha - d/2$ derivatives, and $\Cc = \Ac^{-\alpha}$
+is trace-class if and only if $\nu > 0$, i.e.
+\[
+  \alpha > \frac{d}{2}.
+\]
+In $d=2$ or $d=3$ this rules out $\alpha=1$ and admits $\alpha=2$
+(see Section~\ref{sec:traceclass}).
+\end{property}
+\begin{property}[Marginal variance]\label{prop:var}
+$\sigma^2 \propto \delta^{-\nu}\gamma^{-d/2}$. Changing $\gamma,\delta$ to
+adjust $\rho$ also changes the pointwise variance; to vary correlation length
+at (approximately) fixed variance one must co-vary both parameters.
+\end{property}
+
+% ===========================================================================
+\section{Discretization by finite elements}
+% ===========================================================================
+
+Let $\{\phi_i\}_{i=1}^{n}$ be the Lagrange (P1) basis of the finite-element
+space $V_h \subset \Hc$. A field is represented by its nodal coefficient
+vector $\bx \in \R^n$, $m_h = \sum_i x_i\phi_i$. Two matrices assemble the
+weak form of $\Ac$:
+\begin{align}
+  \text{mass}\quad      \Mmat_{ij} &= \int_\Omega \phi_i\phi_j \dd\bx, \\
+  \text{stiffness}\quad \Kmat_{ij} &= \int_\Omega
+        \Theta\,\grad\phi_i \cdot \grad\phi_j \dd\bx, \\
+  \Amat &= \gamma\,\Kmat + \delta\,\Mmat
+           \quad (+\ \text{boundary term, Section~\ref{sec:bc}}).
+  \label{eq:Amatrix}
+\end{align}
+In the code (\texttt{MaternPrior.\_\_init\_\_}) these are exactly:
+\begin{lstlisting}
+a_form = gamma*inner(Theta*grad(u), grad(v))*dx + delta*inner(u, v)*dx
+m_form = inner(u, v)*dx
+self.A = assemble_matrix(form(a_form));  self.A.assemble()
+self.M = assemble_matrix(form(m_form));  self.M.assemble()
+\end{lstlisting}
+
+\paragraph{Discrete inner product.}
+The FE inner product is $\inner{u_h}{v_h}_{L^2} = \bm{u}^\top \Mmat \bm{v}$, so
+the mass matrix $\Mmat$ plays the role of the $L^2$ metric. This is why $\Mmat$
+appears in the discrete covariance and in the white-noise term below; it is not
+optional bookkeeping but the discrete embodiment of the continuous inner
+product.
+
+\paragraph{Discrete covariance and precision.}
+The finite-element discretization of $\Cc=\Ac^{-\alpha}$ that respects the
+$\Mmat$-inner product is
+\begin{equation}
+  \boxed{\;
+  \alpha=1:\quad \Cc_h = \Amat^{-1}, \qquad
+  \alpha=2:\quad \Cc_h = \Amat^{-1}\,\Mmat\,\Amat^{-1}. \;}
+  \label{eq:disc-cov}
+\end{equation}
+The middle $\Mmat$ for $\alpha=2$ comes from writing $\Ac^2$ weakly as
+$\Amat\,\Mmat^{-1}\Amat$ so that the precision is
+$\Rmat = \Amat\,\Mmat^{-1}\Amat$ and $\Cc_h = \Rmat^{-1}$.
+
+% ===========================================================================
+\section{Sampling: the square-root recipe}
+% ===========================================================================
+
+\subsection{General principle}
+
+To draw $\bx \sim \Nc(\bm 0, \Cc_h)$ one needs any \emph{square-root factor}
+$\Lmat$ with $\Lmat\Lmat^\top = \Cc_h$. Then, with standard normal white noise
+$\bw \sim \Nc(\bm 0, \mathrm{I})$,
+\begin{equation}
+  \bx = \Lmat\,\bw
+  \quad\Longrightarrow\quad
+  \E[\bx\bx^\top] = \Lmat\,\E[\bw\bw^\top]\,\Lmat^\top = \Lmat\Lmat^\top
+    = \Cc_h .
+  \label{eq:sqrt}
+\end{equation}
+The two cases differ only in how this factor is realized cheaply.
+
+\subsection{Discrete white noise and the mass matrix}
+
+A subtlety: the continuous white noise $\Wc$ discretizes not to i.i.d.\ nodal
+values but to a vector $\bb$ with covariance $\Mmat$, because
+$\inner{\Wc}{\phi_i}$ are correlated through the overlapping basis functions.
+Hence a white-noise \emph{load vector} must satisfy
+$\E[\bb\bb^\top] = \Mmat$, obtained as
+\begin{equation}
+  \bb = \Mmat^{1/2}\,\bw, \qquad \bw \sim \Nc(\bm 0, \mathrm{I}).
+\end{equation}
+Computing $\Mmat^{1/2}$ exactly (a dense factor) is avoided in practice by
+\emph{mass lumping}: replace $\Mmat$ by the diagonal matrix
+$\Mmat_{\mathrm L} = \operatorname{diag}(\Mmat\,\bm 1)$ of row sums, whose
+square root is entrywise. The code stores this once:
+\begin{lstlisting}
+self.M.getRowSum(self.ml)          # lumped mass  = row sums of M
+self.ml_sqrt = self.ml.copy();  self.ml_sqrt.sqrtabs()   # sqrt, entrywise
+\end{lstlisting}
+and forms $\bb$ by a pointwise product:
+\begin{lstlisting}
+def _white_noise_scaled(self):     # returns b = sqrt(M_lumped) * w
+    b.setArray(rng.standard_normal(n))
+    b.pointwiseMult(b, self.ml_sqrt)
+    return b
+\end{lstlisting}
+
+\subsection{Case $\alpha=2$ (BiLaplacian): one linear solve}
+
+From \eqref{eq:disc-cov}, $\Cc_h = \Amat^{-1}\Mmat\Amat^{-1}
+= (\Amat^{-1}\Mmat^{1/2})(\Amat^{-1}\Mmat^{1/2})^\top$, so a valid factor is
+$\Lmat = \Amat^{-1}\Mmat^{1/2}$. The sampler is therefore
+\begin{equation}
+  \boxed{\;\text{draw } \bb = \Mmat^{1/2}\bw,\quad
+          \text{solve } \Amat\,\bx = \bb.\;}
+  \label{eq:sample-alpha2}
+\end{equation}
+One elliptic solve per sample. In code:
+\begin{lstlisting}
+if self.alpha == 2:
+    b = self._white_noise_scaled()   # b = sqrt(M) w
+    self.Asolver.solve(b, x)          # A x = b   ->  x ~ N(0, A^{-1} M A^{-1})
+\end{lstlisting}
+Verification: $\E[\bx\bx^\top]
+= \Amat^{-1}\E[\bb\bb^\top]\Amat^{-\top}
+= \Amat^{-1}\Mmat\Amat^{-1} = \Cc_h$, as required.
+
+\subsection{Case $\alpha=1$ (Laplacian): a Cholesky factor}
+
+Here $\Cc_h = \Amat^{-1}$ and a square root $\Amat^{-1/2}$ is not available
+through a single solve. Instead factor $\Amat = \Lmat\Lmat^\top$ (sparse
+Cholesky) and use $\Lmat^{-\top}$ as the factor:
+\begin{equation}
+  \bx = \Lmat^{-\top}\bw
+  \;\Longrightarrow\;
+  \E[\bx\bx^\top] = \Lmat^{-\top}\Lmat^{-1} = (\Lmat\Lmat^\top)^{-1}
+    = \Amat^{-1} = \Cc_h .
+  \label{eq:sample-alpha1}
+\end{equation}
+In code the Cholesky factor is applied through PETSc:
+\begin{lstlisting}
+else:  # alpha == 1
+    w.setArray(rng.standard_normal(n))
+    self._chol.applySymmetricRight(w, x)   # x = L^{-T} w  ->  x ~ N(0, A^{-1})
+\end{lstlisting}
+
+\begin{remark}[Why not reuse the $\alpha=2$ trick?]
+Applying $\Amat^{-1}$ to $\Mmat^{1/2}\bw$ would give covariance
+$\Amat^{-1}\Mmat\Amat^{-1}$, which is $\Ac^{-2}$, \emph{not} $\Ac^{-1}$. The
+$\alpha=1$ field genuinely requires a half-power of $\Amat$, hence the
+factorization.
+\end{remark}
+
+% ===========================================================================
+\section{Trace-class property and mesh dependence}
+\label{sec:traceclass}
+% ===========================================================================
+
+By Property~\ref{prop:nu}, $\Cc=\Ac^{-\alpha}$ is trace-class iff $\alpha>d/2$.
+The eigenvalues of $\Ac$ on a domain grow like $\lambda_k \sim k^{2/d}$
+(Weyl's law), so the eigenvalues of $\Cc$ decay like $\lambda_k^{-\alpha}\sim
+k^{-2\alpha/d}$ and
+\begin{equation}
+  \Tr(\Cc) = \sum_{k} \lambda_k^{-\alpha}
+           \sim \sum_k k^{-2\alpha/d}
+           \;<\infty
+  \iff \frac{2\alpha}{d} > 1
+  \iff \alpha > \frac{d}{2}.
+\end{equation}
+
+\paragraph{$d=2,3$ consequences.}
+\begin{itemize}[nosep]
+  \item $\alpha=1$: $\Tr(\Cc)=\infty$. The ``field'' is not a function in
+        $L^2$; its pointwise variance is formally infinite. On a mesh the
+        variance is finite but \emph{grows without bound as $h\to 0$}: refine
+        the mesh and the samples get rougher and the variance larger. There is
+        no continuum limit.
+  \item $\alpha=2$: $\Tr(\Cc)<\infty$ in $d\le 3$. Samples and pointwise
+        variance \emph{converge} under refinement---coarse, fine and locally
+        refined meshes give statistically identical fields.
+\end{itemize}
+This is precisely the contrast the panels \texttt{01\_laplacian.png} vs.\
+\texttt{02\_bilaplacian.png} are built to show: the $\alpha=1$ variance row
+brightens as the mesh refines, the $\alpha=2$ row does not.
+
+\paragraph{Pointwise variance, computed two ways.}
+The pointwise variance is the diagonal of $\Cc_h$. The code offers:
+\begin{itemize}[nosep]
+\item \emph{Exact} (\texttt{pointwise\_variance\_exact}): solve against each
+      unit vector $\bm e_i$ and read the $i$-th entry,
+      $\operatorname{diag}(\Cc_h)_i = \bm e_i^\top \Cc_h \bm e_i$. This is
+      $n$ linear solves---affordable in 2D, prohibitive on a 3D LV mesh.
+\item \emph{Randomized} (\texttt{pointwise\_variance\_randomized}): average
+      $\bx_k \odot \bx_k$ over $r$ prior samples,
+      $\operatorname{diag}(\Cc_h) \approx \frac1r\sum_{k=1}^r \bx_k^2$,
+      an unbiased Monte-Carlo (Hutchinson-type) estimator. This is what
+      \texttt{lv\_priors.py} uses.
+\end{itemize}
+
+% ===========================================================================
+\section{Boundary conditions and artifacts}
+\label{sec:bc}
+% ===========================================================================
+
+The Mat\'ern formulas \eqref{eq:matern} hold for the whole-space operator. On a
+bounded domain the choice of boundary condition for $\Ac$ changes the field
+near $\partial\Omega$.
+
+\paragraph{Natural (Neumann) condition.}
+Assembling $\Amat = \gamma\Kmat+\delta\Mmat$ with no boundary term imposes a
+homogeneous Neumann condition. This \emph{inflates} the variance within roughly
+one correlation length of the boundary: with less ``material'' beyond the edge
+to correlate against, the field is under-constrained there.
+
+\paragraph{Robin condition.}
+Adding a boundary mass term
+\begin{equation}
+  \Amat \;\leftarrow\; \Amat + \beta \int_{\partial\Omega} u\,v \dd s,
+  \qquad
+  \beta = \frac{\sqrt{\gamma\,\delta}}{1.42},
+  \label{eq:robin}
+\end{equation}
+approximately restores the stationary boundary variance; the constant
+$1.42\approx\sqrt2$ is the standard hIPPYlib calibration for
+$d=2$. In code:
+\begin{lstlisting}
+if robin_bc:
+    beta = sqrt(gamma*delta)/1.42
+    a_form += beta*inner(u, v)*ds
+\end{lstlisting}
+The panel \texttt{03\_boundary\_conditions.png} contrasts the two: the natural
+BC shows a bright variance halo along the edge, the Robin BC a nearly uniform
+interior variance.
+
+% ===========================================================================
+\section{Anisotropy: directional correlation}
+\label{sec:aniso}
+% ===========================================================================
+
+Replacing the scalar diffusion by a tensor $\Theta$ in \eqref{eq:Aoperator}
+makes the correlation length \emph{direction-dependent}: correlation is longer
+along directions of larger diffusion. A symmetric positive-definite $\Theta$ is
+built from an orthonormal frame and eigenvalues $\theta_i>0$.
+
+\paragraph{2D, rotation form.}
+In the tutorial (\texttt{anis\_tensor}),
+\begin{equation}
+  \Theta = R\,\operatorname{diag}(\theta_0,\theta_1)\,R^\top,
+  \qquad
+  R = \begin{pmatrix}\cos\alpha & -\sin\alpha\\
+                     \sin\alpha & \cos\alpha\end{pmatrix},
+\end{equation}
+so $\theta_0,\theta_1$ set the correlation lengths along the two rotated axes
+and $\alpha$ the orientation.
+
+\paragraph{3D, fibre-aligned form.}
+On the ventricle (\texttt{lv\_priors.fiber\_anis\_tensor}) the natural frame is
+the muscle-fibre field $\bm f_0(\bx)$:
+\begin{equation}
+  \Theta = \theta_\parallel\, \bm f_0\bm f_0^\top
+         + \theta_\perp\,\bigl(\mathrm{I} - \bm f_0\bm f_0^\top\bigr),
+\end{equation}
+which sets diffusion $\theta_\parallel$ along the fibre and $\theta_\perp$
+in the plane transverse to it. Choosing $\theta_\parallel\neq\theta_\perp$
+produces fields whose correlation follows (or crosses) the fibre architecture.
+
+% ===========================================================================
+\section{Putting it together: the algorithms}
+% ===========================================================================
+
+\begin{center}
+\fbox{\parbox{0.92\linewidth}{
+\textbf{Algorithm 1 --- Draw one prior sample.}\\[2pt]
+\textbf{Input:} assembled $\Amat,\Mmat$; lumped $\Mmat_{\mathrm L}^{1/2}$;
+factor/solver for $\Amat$; power $\alpha$.\\
+\textbf{Output:} $\bx\sim\Nc(\bm 0,\Cc_h)$.
+\begin{enumerate}[nosep,leftmargin=2.2em]
+  \item Draw $\bw\sim\Nc(\bm 0,\mathrm I)$ (one standard normal per node).
+  \item If $\alpha=2$: set $\bb = \Mmat_{\mathrm L}^{1/2}\odot\bw$; solve
+        $\Amat\,\bx=\bb$.
+  \item If $\alpha=1$: apply the Cholesky factor, $\bx=\Lmat^{-\top}\bw$
+        with $\Lmat\Lmat^\top=\Amat$.
+  \item Return $\bx$.
+\end{enumerate}}}
+\end{center}
+
+\medskip
+
+\begin{center}
+\fbox{\parbox{0.92\linewidth}{
+\textbf{Algorithm 2 --- Pointwise variance (randomized).}\\[2pt]
+\textbf{Input:} sampler above; number of samples $r$.\\
+\textbf{Output:} $\bm v \approx \operatorname{diag}(\Cc_h)$.
+\begin{enumerate}[nosep,leftmargin=2.2em]
+  \item $\bm v \leftarrow \bm 0$.
+  \item For $k=1,\dots,r$: draw $\bx_k$ (Algorithm 1);
+        $\bm v \mathrel{+}= \bx_k \odot \bx_k$.
+  \item Return $\bm v / r$.
+\end{enumerate}}}
+\end{center}
+
+% ===========================================================================
+\section{Parameter cheat-sheet}
+% ===========================================================================
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Goal & Change & Reason \\
+\midrule
+Smoother field (longer $\rho$) & increase $\gamma$ \emph{or} decrease $\delta$
+  & $\rho\propto\sqrt{\gamma/\delta}$ (Prop.~\ref{prop:rho}) \\
+Rougher field (shorter $\rho$) & decrease $\gamma$ \emph{or} increase $\delta$
+  & same \\
+Well-posed in 2D/3D & use $\alpha=2$
+  & trace-class needs $\alpha>d/2$ (Prop.~\ref{prop:nu}) \\
+Reduce edge variance halo & \texttt{robin\_bc=True}
+  & Robin BC restores boundary variance (\S\ref{sec:bc}) \\
+Directional correlation & anisotropic $\Theta$
+  & longer $\rho$ along larger-diffusion axis (\S\ref{sec:aniso}) \\
+Fix variance while changing $\rho$ & co-vary $\gamma,\delta$
+  & $\sigma^2\propto\delta^{-\nu}\gamma^{-d/2}$ (Prop.~\ref{prop:var}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On the LV ellipsoid (extent $\sim 10$ units) the code uses $\gamma=1,\delta=0.5$
+for $\rho\approx\sqrt{2}\approx1.4$; the unit-square tutorial uses
+$\gamma=1,\delta=25$ for $\rho=0.2$.
+
+% ===========================================================================
+\section*{Summary}
+\addcontentsline{toc}{section}{Summary}
+% ===========================================================================
+
+The prior is a Gaussian measure whose covariance is a negative fractional power
+$\Ac^{-\alpha}$ of the elliptic operator
+$\Ac=-\gamma\divg(\Theta\grad)+\delta\,\mathrm{Id}$. Discretization turns $\Ac$
+into a sparse matrix $\Amat=\gamma\Kmat+\delta\Mmat$. Sampling multiplies white
+noise by a square-root factor of the discrete covariance: one elliptic solve
+$\Amat\bx=\Mmat^{1/2}\bw$ for $\alpha=2$, or a Cholesky application
+$\bx=\Lmat^{-\top}\bw$ for $\alpha=1$. The parameters $\gamma,\delta$ set the
+correlation length and variance; $\alpha$ sets smoothness and---crucially---
+whether the prior is well defined at all ($\alpha>d/2$); the boundary term
+controls edge artifacts; and the tensor $\Theta$ controls directional
+correlation, which on the ventricle follows the muscle fibres.
+
+\end{document}
