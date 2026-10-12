@@ -87,6 +87,14 @@ parser.add_argument("--C0",    type=float, default=2.0,
 # likelihood
 parser.add_argument("--noise-std", type=float, default=1e-3,
                     help="Std of each measured F component (pointwise likelihood)")
+parser.add_argument("--data-noise", type=float, default=0.0,
+                    help="Relative noise ADDED TO THE DATA: each F component gets "
+                         "N(0, (p*RMS(Fd-I))^2), e.g. 0.01 = 1%% (default 0 = clean)")
+parser.add_argument("--data-noise-seed", type=int, default=1234,
+                    help="Seed of the data-noise realization")
+parser.add_argument("--match-noise-std", action="store_true",
+                    help="If --data-noise > 0, set the likelihood std of each case "
+                         "to the actual data-noise std (overrides --noise-std)")
 parser.add_argument("--misfit-weight", choices=["pointwise", "legacy"], default="pointwise",
                     help="pointwise: sum over sensors; legacy: ex05's (1/|Omega|) integral")
 # forward problem
@@ -99,7 +107,7 @@ parser.add_argument("--gtol",       type=float, default=1e-8)
 parser.add_argument("--ftol",       type=float, default=1e-20)
 parser.add_argument("--maxiter",    type=int,   default=200,
                     help="Max outer iterations for BOTH methods")
-parser.add_argument("--cg-maxiter", type=int,   default=200)
+parser.add_argument("--cg-maxiter", type=int,   default=500)
 parser.add_argument("--cg-tol",     type=float, default=0.1)
 parser.add_argument("--C-bounds",   type=float, nargs=2, default=[1.0, 16.0],
                     help="Bounds on C in kPa (applied to m as log)")
@@ -656,6 +664,7 @@ if prior_std is not None:
     print(f"  -> pointwise 95% prior band on C: [{args.C0*np.exp(-2*s_avg):.2f}, "
           f"{args.C0*np.exp(2*s_avg):.2f}] kPa")
 print(f"  likelihood: {args.misfit_weight}, noise_std={args.noise_std}, sensors={Npoints}")
+print(f"  data noise: {100*args.data_noise:g}% of RMS(Fd-I), seed={args.data_noise_seed}")
 print(f"  |Omega|={volume_mesh:.3e}, mean sensor-cell vol={np.mean(sensor_vols):.3e}")
 print(f"  forward: load={args.load}, kappa={args.kappa}, load_steps={args.load_steps}")
 print(f"  bounds: C in {args.C_bounds} kPa  (m in [{LO:.4f}, {HI:.4f}])")
@@ -674,8 +683,18 @@ for case in args.cases:
     ud_arr, Fd_arr, cd = prob_ventricle_passive_filling(
         geo, ndofs_data=args.num_nodes, case_type=case,
         target_load=args.load, kappa_bulk=args.kappa)
-    Fd_arr = np.asarray(Fd_arr)
-    set_data(Fd_arr)
+    Fd_arr = np.asarray(Fd_arr)                    # clean data (used for metrics)
+
+    # --- additive Gaussian noise on the data only (likelihood unchanged) ---
+    F_scale = float(np.sqrt(np.mean((Fd_arr - np.eye(dim)) ** 2)))   # RMS(Fd - I)
+    sigma_data = args.data_noise * F_scale
+    eps = np.random.default_rng(args.data_noise_seed).standard_normal(Fd_arr.shape)
+    Fd_obs = Fd_arr + sigma_data * eps
+    sigma_lik = sigma_data if (args.match_noise_std and sigma_data > 0) else args.noise_std
+    noise_prec.value = 1.0 / sigma_lik ** 2
+    print(f"  data noise: {100*args.data_noise:g}% of RMS(Fd-I) = {F_scale:.4e} "
+          f"-> std {sigma_data:.4e}   (likelihood std = {sigma_lik:.4e})")
+    set_data(Fd_obs)
     C_true = cd.x.array.copy()
     if np.any(C_true <= 0):
         raise RuntimeError("ground-truth C has non-positive values; log C undefined")
@@ -692,6 +711,9 @@ for case in args.cases:
         "settings": vars(args) | {"m0": M0, "beta": prior.beta,
                                   "n_param_dofs": prior.ndofs, "n_sensors": Npoints,
                                   "volume_mesh": volume_mesh},
+        "data_noise": dict(level=args.data_noise, seed=args.data_noise_seed,
+                           F_scale_rms=F_scale, sigma_data=sigma_data,
+                           noise_std_likelihood=sigma_lik),
         "true": true_obj,
         "init": init_obj | param_metrics(x0, m_true) | state_metrics(u_init, u_true, Fd_arr),
     }
@@ -708,6 +730,7 @@ for case in args.cases:
         m = info | obj_vals | param_metrics(x_opt, m_true) | state_metrics(u_opt, u_true, Fd_arr)
         metrics[method] = m
         results[method] = (x_opt, u_opt)
+        np.save(case_dir / f"m_map_{method}_{case}.npy", x_opt)   # for cross-run comparison
         summary_rows.append({"case": case, "method": method} | m)
 
     if len(results) == 2:
