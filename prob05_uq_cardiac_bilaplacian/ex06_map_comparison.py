@@ -82,6 +82,9 @@ parser.add_argument("--num-nodes", type=int, default=64)
 # prior (BiLaplacian on m); defaults = calibrated values
 parser.add_argument("--gamma", type=float, default=1.457)
 parser.add_argument("--delta", type=float, default=1.441e-2)
+parser.add_argument("--prior-fiber-ratio", type=float, default=1.0,
+                    help="Anisotropic prior: correlation length along the fibres / "
+                         "across them (Theta = I + (a^2-1) f0 f0^T). 1 = isotropic (default)")
 parser.add_argument("--C0",    type=float, default=2.0,
                     help="Prior mean in kPa (m0 = log C0); default 2 kPa")
 # likelihood
@@ -107,7 +110,7 @@ parser.add_argument("--gtol",       type=float, default=1e-8)
 parser.add_argument("--ftol",       type=float, default=1e-20)
 parser.add_argument("--maxiter",    type=int,   default=200,
                     help="Max outer iterations for BOTH methods")
-parser.add_argument("--cg-maxiter", type=int,   default=500)
+parser.add_argument("--cg-maxiter", type=int,   default=200)
 parser.add_argument("--cg-tol",     type=float, default=0.1)
 parser.add_argument("--C-bounds",   type=float, nargs=2, default=[1.0, 16.0],
                     help="Bounds on C in kPa (applied to m as log)")
@@ -133,16 +136,18 @@ M0 = float(np.log(args.C0))
 class BiLaplacianPrior:
     """
     H_prior = R M_L^{-1} R,   C_pr = H_prior^{-1} = R^{-1} M_L R^{-1},
-    R = gamma K + delta M + beta M_bndry,  beta = sqrt(gamma delta)/1.42.
+    R = gamma K_Theta + delta M + beta M_bndry,  beta = sqrt(gamma delta)/1.42,
+    K_Theta from  int (Theta grad q) . grad dq dx   (Theta = I: isotropic).
     """
 
-    def __init__(self, Va, gamma, delta, dx, domain):
+    def __init__(self, Va, gamma, delta, dx, domain, theta=None):
         self.ndofs = Va.dofmap.index_map.size_local * Va.dofmap.index_map_bs
         self.gamma, self.delta = float(gamma), float(delta)
         self.beta = np.sqrt(self.gamma * self.delta) / 1.42
         q, dq = ufl.TrialFunction(Va), ufl.TestFunction(Va)
         ds_all = ufl.Measure("ds", domain=domain)
-        R_form = (self.gamma * ufl.inner(ufl.grad(q), ufl.grad(dq)) * dx
+        grad_q = ufl.grad(q) if theta is None else theta * ufl.grad(q)
+        R_form = (self.gamma * ufl.inner(grad_q, ufl.grad(dq)) * dx
                   + self.delta * ufl.inner(q, dq) * dx
                   + self.beta * ufl.inner(q, dq) * ds_all)
         self._R = fem.petsc.assemble_matrix(fem.form(R_form))
@@ -292,6 +297,11 @@ for cell_id in range(domain.topology.index_map(domain.topology.dim).size_local):
     for node in domain.geometry.dofmap[cell_id]:
         node_to_cells.setdefault(int(node), []).append(cell_id)
 sensor_cells = [node_to_cells[int(d)][0] for d in selected_dofs]
+# each sensor must have its own cell, otherwise two data overwrite each other
+# in Fd_func and Phi silently loses terms (possible for large --num-nodes)
+if len(set(sensor_cells)) != len(sensor_cells):
+    raise RuntimeError(f"{len(sensor_cells) - len(set(sensor_cells))} of {len(sensor_cells)} "
+                       "sensors share a cell with another sensor; reduce --num-nodes.")
 
 TT = fem.functionspace(domain, ("DG", 0, (dim, dim)))
 W0 = fem.functionspace(domain, ("DG", 0))
@@ -332,7 +342,15 @@ Phi = 0.5 * noise_prec * sensor_weight * ufl.inner(diffF, diffF) * dx
 Phi_c = fem.form(Phi)
 
 # prior
-prior = BiLaplacianPrior(Va, args.gamma, args.delta, dx, domain)
+# anisotropic prior (Bui-Thanh et al. 2013): A = -gamma div(Theta grad) + delta,
+# Theta = I + (a^2 - 1) f0 f0^T  ->  correlation length along the fibres is a times
+# the length across them (a = --prior-fiber-ratio; a = 1 gives the isotropic prior)
+if args.prior_fiber_ratio != 1.0:
+    _f0n = geo.f0 / ufl.sqrt(ufl.inner(geo.f0, geo.f0))
+    Theta = ufl.Identity(dim) + (args.prior_fiber_ratio ** 2 - 1.0) * ufl.outer(_f0n, _f0n)
+else:
+    Theta = None
+prior = BiLaplacianPrior(Va, args.gamma, args.delta, dx, domain, theta=Theta)
 m0_vec = np.full(prior.ndofs, M0)
 
 # adjoint (direct solver -> gradient accurate to round-off)
@@ -655,6 +673,8 @@ x0 = np.clip(x0, LO, HI)
 print("\n" + "=" * 70)
 print(" ex06 MAP COMPARISON   (parameter m = log C)")
 print(f"  cases={args.cases}  methods={args.methods}")
+print(f"  prior anisotropy: fibre/cross-fibre correlation ratio = {args.prior_fiber_ratio:g}"
+      + ("  (isotropic)" if args.prior_fiber_ratio == 1.0 else ""))
 print(f"  prior: m0 = log({args.C0}) = {M0:.4f}, gamma={prior.gamma:.4g}, "
       f"delta={prior.delta:.4g}, beta={prior.beta:.4g}")
 if prior_std is not None:

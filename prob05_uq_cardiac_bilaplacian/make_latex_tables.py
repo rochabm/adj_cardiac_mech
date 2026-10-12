@@ -313,18 +313,17 @@ def table_paper(runs):
     Cost per method row; accuracy once per (case, noise) since both methods
     converge to the same MAP (max |dm| reported in the note).
     """
-    ncol = 13
+    ncol = 10
     L = [r"\begin{table}[htbp]", r"\centering", r"\small",
          r"\setlength{\tabcolsep}{3pt}",
          r"\caption{MAP estimation with L-BFGS-B and inexact Newton-CG for both test "
          r"problems and three noise levels: computational cost and accuracy.}",
          r"\label{tab:map_summary}",
-         r"\begin{tabular}{lllrrrrlccccc}", r"\toprule",
-         r" & & & \multicolumn{5}{c}{Computational cost} & \multicolumn{4}{c}{Accuracy of $m_{\mathrm{MAP}}$} & \\",
-         r"\cmidrule(lr){4-8}\cmidrule(lr){9-12}",
-         r"Problem & Noise & Method & Iter. & Fwd. & $H\hat{m}$ & Time [s] & Stop "
-         r"& $e_C^{L^2}$ [\%] & $e_C^{\max}$ [\%] & $e_C^{\mathrm{core}}$ [\%] "
-         r"& $r/\sigma_{\mathrm{lik}}$ & Speed-up \\",
+         r"\begin{tabular}{lllrrrrccc}", r"\toprule",
+         r" & & & \multicolumn{4}{c}{Computational cost} & \multicolumn{2}{c}{Error of $C_{\mathrm{MAP}}$} & \\",
+         r"\cmidrule(lr){4-7}\cmidrule(lr){8-9}",
+         r"Problem & Noise & Method & Iter. & Fwd. & $H\hat{m}$ & Time [s] "
+         r"& $e_C^{L^2}$ [\%] & $e_C^{\mathrm{core}}$ [\%] & Speed-up \\",
          r"\midrule"]
     dm_max = 0.0
     groups = by_case(runs)
@@ -345,9 +344,7 @@ def table_paper(runs):
             else:
                 speed = DASH
             core = ref.get("C_mean_rel_core") if case == "fibrosis" else None
-            acc = [pct(ref.get("C_rel_L2")), pct(ref.get("C_max_rel")), pct(core),
-                   f"${resid_over_sigma(r, ref):.2f}$" if ref.get("Phi") is not None else DASH,
-                   speed]
+            acc = [pct(ref.get("C_rel_L2")), pct(core), speed]
             for mi, m in enumerate(meths):
                 x = r[m]
                 c0 = (f"\\multirow{{{n_case_rows}}}{{*}}{{{CASE_LABEL[case]}}}"
@@ -357,8 +354,7 @@ def table_paper(runs):
                        if k > 1 else noise_label(noise(r)["level"])) if mi == 0 else "")
                 cost = [METHOD_LABEL[m], integer(x.get("n_iter")), integer(x.get("n_forward")),
                         integer(x.get("n_hessvec")) if m == "newtoncg" else DASH,
-                        f"${x['wall_time_s']:.0f}$" if x.get("wall_time_s") is not None else DASH,
-                        stop_label(m, x.get("stop_reason", ""))]
+                        f"${x['wall_time_s']:.0f}$" if x.get("wall_time_s") is not None else DASH]
                 if mi == 0:
                     tail = [(f"\\multirow{{{k}}}{{*}}{{{v}}}" if k > 1 else v) for v in acc]
                 else:
@@ -377,11 +373,10 @@ def table_paper(runs):
           r"products. Both methods start from the same initial guess with the same bounds "
           r"and tolerances, and converge to the same MAP point "
           + (f"(max.\\ nodal $|\\Delta m| = {sci(dm_max)[1:-1]}$)" if dm_max > 0 else "")
-          + r"; the accuracy columns therefore apply to both. "
+          + r"; the error columns therefore apply to both. "
           r"$e_C^{L^2}=\|C_{\mathrm{MAP}}-C_{\mathrm{true}}\|_{L^2}/\|C_{\mathrm{true}}\|_{L^2}$; "
-          r"$e_C^{\max}$: maximum nodal relative error; $e_C^{\mathrm{core}}$: mean nodal "
-          r"relative error in the fibrotic core ($r\le5$~mm). "
-          r"$r/\sigma_{\mathrm{lik}}$: RMS data residual over $\sigma_{\mathrm{lik}}$. "
+          r"$e_C^{\mathrm{core}}$: mean nodal relative error in the fibrotic core "
+          r"($r\le5$~mm). "
           r"Speed-up: L-BFGS-B / Newton-CG in forward solves / wall time.",
           r"\end{minipage}", r"\end{table}"]
     return "\n".join(L)
