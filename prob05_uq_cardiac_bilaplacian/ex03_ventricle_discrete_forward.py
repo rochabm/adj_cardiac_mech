@@ -89,8 +89,8 @@ def prob_ventricle_passive_filling(geo, ndofs_data=32, case_type="fibrosis",
 
     Npoints = len(selected_dofs)
     print(f"Número de nodes: {Npoints}")
-    print("Coordenadas nodes selecionados:")
-    print(selected_coords)
+    # print("Coordenadas nodes selecionados:")
+    # print(selected_coords)
 
     save_selected_nodes(selected_coords, selected_dofs)
 

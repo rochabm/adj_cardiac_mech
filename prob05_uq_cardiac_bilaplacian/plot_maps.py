@@ -20,6 +20,7 @@ with matplotlib, so text and colour bars are publication-style.
 
 Usage:
     python plot_maps.py --root out_final
+    python plot_maps.py --root out_final --clim-from-uq out_ex07   # same colours as plot_uq.py
     python plot_maps.py --root out_final --errors --out maps.pdf
     python plot_maps.py --root out_final --backend matplotlib
 """
@@ -205,13 +206,26 @@ def crop_white(img, pad=6, thr=248):
 # figure (matplotlib layout, Times fonts, colour bar as in the prior figure)
 # =============================================================================
 
-def make_figure(data, out, kind, cmap, view, zoom, backend, dpi):
+def uq_clim(uq_root, case, n_samples=4):
+    """Colour range of plot_uq.py's posterior-sample figure for this case:
+    min/max over truth, MAP and posterior samples 1..n of uq_<case>.h5."""
+    h5 = Path(uq_root) / case / f"uq_{case}.h5"
+    if not h5.exists():
+        print(f"  missing: {h5} -- using the ground-truth range for {case}")
+        return None
+    names = ["C_true", "C_map"] + [f"C_post_sample_{s}" for s in range(1, n_samples + 1)]
+    _, _, v = read_case(h5, names)
+    return (min(float(v[n].min()) for n in names), max(float(v[n].max()) for n in names))
+
+
+def make_figure(data, out, kind, cmap, view, zoom, backend, dpi, clims=None):
     Panels = PyVistaPanels if backend == "pyvista" else MatplotlibPanels
     rows = []
     for case, d in data.items():
         P = Panels(d["pts"], d["tets"], view, zoom)
         if kind == "maps":
-            clim = (float(d["true"].min()), float(d["true"].max()))
+            clim = (clims or {}).get(case) or (float(d["true"].min()), float(d["true"].max()))
+            print(f"  {case}: colour range [{clim[0]:.3f}, {clim[1]:.3f}] kPa")
             panels = [("Ground truth", d["true"])] + \
                      [(f"MAP, {lab} noise", v) for lab, v in d["maps"]]
             label = r"$C$ [kPa]"
@@ -253,7 +267,9 @@ def make_figure(data, out, kind, cmap, view, zoom, backend, dpi):
         sm = cm.ScalarMappable(norm=colors.Normalize(*r["clim"]), cmap=cmap)
         cb = fig.colorbar(sm, cax=cax)
         cb.set_label(r["label"], fontsize=10)
-        cb.ax.tick_params(labelsize=9, length=3, width=0.6)
+        cb.ax.tick_params(labelsize=9, direction="out", length=3, width=0.6,
+                          right=True, left=False)
+        cb.ax.minorticks_off()
         cb.outline.set_linewidth(0.8)
 
     fig.savefig(out, dpi=dpi, bbox_inches="tight", pad_inches=0.03)
@@ -281,6 +297,12 @@ def main():
     ap.add_argument("--zoom", type=float, default=1.15)
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--backend", choices=["auto", "pyvista", "matplotlib"], default="auto")
+    ap.add_argument("--clim-from-uq", default=None, metavar="UQ_ROOT",
+                    help="Use the colour range of plot_uq.py's sample figure (e.g. out_ex07)")
+    ap.add_argument("--n-samples", type=int, default=4,
+                    help="Samples shown in the plot_uq figure (for --clim-from-uq)")
+    ap.add_argument("--clim-linear", type=float, nargs=2, default=None)
+    ap.add_argument("--clim-fibrosis", type=float, nargs=2, default=None)
     a = ap.parse_args()
 
     data = collect(a.root, a.method)
@@ -295,7 +317,14 @@ def main():
         except ImportError:
             backend = "matplotlib"
     print(f"Rendering with {backend}")
-    make_figure(data, out, "maps", cmap, a.view, a.zoom, backend, a.dpi)
+    clims = {}
+    if a.clim_from_uq:
+        clims = {c: uq_clim(a.clim_from_uq, c, a.n_samples) for c in data}
+    if a.clim_linear:
+        clims["linear"] = tuple(a.clim_linear)
+    if a.clim_fibrosis:
+        clims["fibrosis"] = tuple(a.clim_fibrosis)
+    make_figure(data, out, "maps", cmap, a.view, a.zoom, backend, a.dpi, clims)
     if a.errors:
         make_figure(data, out.with_name(out.stem + "_errors" + out.suffix),
                     "errors", cmap, a.view, a.zoom, backend, a.dpi)

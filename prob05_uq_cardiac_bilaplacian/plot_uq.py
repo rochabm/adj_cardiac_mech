@@ -40,7 +40,7 @@ CASE_MARKER = {"linear": "o", "fibrosis": "s"}
 # 1) truth | MAP | posterior samples
 # =============================================================================
 
-def plot_samples(root, case, n_samples, with_truth, cmap, view, zoom, backend, out):
+def plot_samples(root, case, n_samples, with_truth, cmap, view, zoom, backend, out, clim=None):
     h5 = Path(root) / case / f"uq_{case}.h5"
     names = (["C_true"] if with_truth else []) + ["C_map"] + \
             [f"C_post_sample_{s}" for s in range(1, n_samples + 1)]
@@ -49,9 +49,11 @@ def plot_samples(root, case, n_samples, with_truth, cmap, view, zoom, backend, o
              [f"Posterior sample {s}" for s in range(1, n_samples + 1)]
 
     # one colour scale for all panels: the full range of what is shown
-    lo = min(float(vals[nm].min()) for nm in names)
-    hi = max(float(vals[nm].max()) for nm in names)
-    clim = (lo, hi)
+    if clim is None:
+        lo = min(float(vals[nm].min()) for nm in names)
+        hi = max(float(vals[nm].max()) for nm in names)
+        clim = (lo, hi)
+    print(f"  {case}: colour range [{clim[0]:.3f}, {clim[1]:.3f}] kPa")
 
     Panels = PyVistaPanels if backend == "pyvista" else MatplotlibPanels
     P = Panels(pts, tets, view, zoom)
@@ -111,7 +113,7 @@ def plot_eigenvalues(root, cases, out, xmax=None, ymin=None):
     if n_max == 0:
         raise SystemExit(f"No eigenvalues_<case>.txt found under {root}/<case>/")
     ax.axhline(1.0, color="black", linewidth=0.8, linestyle="--")
-    ax.set_xlabel(r"number")
+    ax.set_xlabel(r"index $i$")
     ax.set_ylabel(r"eigenvalue $\lambda_i$")
     ax.set_xlim(0, xmax or n_max + 1)
     if ymin:
@@ -139,6 +141,8 @@ def main():
     ap.add_argument("--view", type=float, nargs=3, default=[0.0, 0.0, -1.0])
     ap.add_argument("--zoom", type=float, default=1.15)
     ap.add_argument("--backend", choices=["auto", "pyvista", "matplotlib"], default="auto")
+    ap.add_argument("--clim", type=float, nargs=2, default=None,
+                    help="Fixed colour range in kPa (default: min/max of the shown panels)")
     ap.add_argument("--use-tex", action="store_true", help="LaTeX text (newtx), as paper_style")
     ap.add_argument("--out", default=None, help="Output stem (no extension)")
     a = ap.parse_args()
@@ -157,7 +161,7 @@ def main():
                 backend = "matplotlib"
         out = a.out or str(Path(a.root) / f"posterior_samples_{a.case}")
         plot_samples(a.root, a.case, a.n_samples, not a.no_truth, get_cmap(a.cmap),
-                     a.view, a.zoom, backend, out)
+                     a.view, a.zoom, backend, out, a.clim)
     if a.eig:
         out = (a.out + "_eig") if (a.out and a.case) else (a.out or str(Path(a.root) / "eigenvalues"))
         plot_eigenvalues(a.root, CASES, out, a.eig_xmax, a.eig_ymin)
